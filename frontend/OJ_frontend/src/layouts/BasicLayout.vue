@@ -49,14 +49,22 @@ const navItems = [
             {{ item.name }}
           </router-link>
           <!-- 管理员菜单 -->
-          <router-link
-            v-if="isAdmin"
-            to="/manage/question"
-            class="nav-link"
-            active-class="nav-link-active"
-          >
-            管理题目
-          </router-link>
+          <template v-if="isAdmin">
+            <router-link
+              to="/manage/question"
+              class="nav-link"
+              active-class="nav-link-active"
+            >
+              管理题目
+            </router-link>
+            <router-link
+              to="/manage/user"
+              class="nav-link"
+              active-class="nav-link-active"
+            >
+              管理用户
+            </router-link>
+          </template>
         </nav>
 
         <!-- 右侧用户区 -->
@@ -70,6 +78,7 @@ const navItems = [
                 <span class="user-name">{{ user.userName }}</span>
               </div>
               <template #content>
+                <a-doption @click="router.push('/profile')">个人中心</a-doption>
                 <a-doption @click="handleLogout">退出登录</a-doption>
               </template>
             </a-dropdown>

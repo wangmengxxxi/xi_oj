@@ -59,6 +59,18 @@ const router = createRouter({
           meta: { requiresRole: 'admin' },
         },
         {
+          path: 'manage/user',
+          name: 'manageUser',
+          component: () => import('@/views/user/ManageUserView.vue'),
+          meta: { requiresRole: 'admin' },
+        },
+        {
+          path: 'profile',
+          name: 'profile',
+          component: () => import('@/views/user/UserProfileView.vue'),
+          meta: { requiresRole: 'user', hideInMenu: true },
+        },
+        {
           path: 'noAuth',
           name: 'noAuth',
           component: () => import('@/views/NoAuthView.vue'),

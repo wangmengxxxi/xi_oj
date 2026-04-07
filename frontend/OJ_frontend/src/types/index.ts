@@ -47,6 +47,33 @@ export interface UserUpdateMyRequest {
   userProfile?: string
 }
 
+// 管理员视角的完整用户信息（来自 /user/list/page 返回 User 实体）
+export interface UserAdmin {
+  id: number
+  userAccount: string
+  userName: string | null
+  userAvatar: string | null
+  userProfile: string | null
+  userRole: 'user' | 'admin' | 'ban'
+  createTime: string
+  updateTime: string
+}
+
+export interface UserQueryRequest {
+  userName?: string
+  userRole?: string
+  current?: number
+  pageSize?: number
+}
+
+export interface UserUpdateAdminRequest {
+  id: number
+  userName?: string
+  userAvatar?: string
+  userProfile?: string
+  userRole?: string
+}
+
 // ===== 题目 =====
 export interface JudgeConfig {
   timeLimit: number

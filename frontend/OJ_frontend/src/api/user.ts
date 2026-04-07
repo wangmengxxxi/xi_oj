@@ -2,10 +2,14 @@ import request from './request'
 import type {
   LoginUserVO,
   UserVO,
+  UserAdmin,
   UserLoginRequest,
   UserRegisterRequest,
   UserUpdateMyRequest,
+  UserQueryRequest,
+  UserUpdateAdminRequest,
   BaseResponse,
+  Page,
 } from '@/types'
 
 export const userLogin = (data: UserLoginRequest) =>
@@ -25,3 +29,13 @@ export const getUserVOById = (id: number) =>
 
 export const updateMyUser = (data: UserUpdateMyRequest) =>
   request.post<BaseResponse<boolean>>('/user/update/my', data)
+
+// 管理员接口
+export const listUserByPage = (data: UserQueryRequest) =>
+  request.post<BaseResponse<Page<UserAdmin>>>('/user/list/page', data)
+
+export const updateUser = (data: UserUpdateAdminRequest) =>
+  request.post<BaseResponse<boolean>>('/user/update', data)
+
+export const deleteUser = (id: number) =>
+  request.post<BaseResponse<boolean>>('/user/delete', { id })
