@@ -1,6 +1,7 @@
 package com.XI.xi_oj.controller;
 
 
+import com.XI.xi_oj.annotation.RateLimit;
 import com.XI.xi_oj.model.dto.questionsubmit.QuestionSubmitAddRequest;
 import com.XI.xi_oj.model.dto.questionsubmit.QuestionSubmitQueryRequest;
 import com.XI.xi_oj.model.entity.QuestionSubmit;
@@ -302,6 +303,7 @@ public class QuestionController {
      * @param request
      * @return 提交记录的 id
      */
+    @RateLimit
     @PostMapping("/question_submit/do")
     public BaseResponse<Long> doQuestionSubmit(@RequestBody QuestionSubmitAddRequest questionSubmitAddRequest,
                                                HttpServletRequest request) {

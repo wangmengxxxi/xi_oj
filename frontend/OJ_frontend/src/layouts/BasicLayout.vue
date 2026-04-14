@@ -64,6 +64,13 @@ const navItems = [
             >
               管理用户
             </router-link>
+            <router-link
+              to="/manage/rate-limit"
+              class="nav-link"
+              active-class="nav-link-active"
+            >
+              限流配置
+            </router-link>
           </template>
         </nav>
 

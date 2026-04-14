@@ -65,6 +65,12 @@ const router = createRouter({
           meta: { requiresRole: 'admin' },
         },
         {
+          path: 'manage/rate-limit',
+          name: 'manageRateLimit',
+          component: () => import('@/views/admin/ManageRateLimitView.vue'),
+          meta: { requiresRole: 'admin' },
+        },
+        {
           path: 'profile',
           name: 'profile',
           component: () => import('@/views/user/UserProfileView.vue'),

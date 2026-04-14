@@ -82,6 +82,7 @@ function handleLanguageChange(val: string) {
 const submitting = ref(false)
 const rateLimitMsg = ref('')
 const rateLimitUntil = ref(0) // 本地限流冷却截止时间戳
+const rateLimitType = ref<'cooldown' | 'daily' | ''>('') // 区分冷却型 vs 日级限流
 
 const submitDisabled = computed(() => {
   return submitting.value || (rateLimitUntil.value > Date.now())
@@ -100,6 +101,7 @@ function startCooldown(seconds: number) {
       cooldownTimer = null
       rateLimitMsg.value = ''
       rateLimitUntil.value = 0
+      rateLimitType.value = ''
     }
   }, 1000)
 }
@@ -187,17 +189,37 @@ async function handleSubmit() {
     pollTimer = setTimeout(() => pollJudgeResult(submitId), 1500)
   } catch (err: any) {
     if (err?.isRateLimit) {
-      rateLimitMsg.value = err.message ?? '提交频率过快，请稍后再试'
+      const msg = err.message ?? '提交频率过高，请稍后再试'
+      rateLimitMsg.value = msg
       judgeResult.value = { status: 'idle', submitVO: null }
-      // 解析冷却秒数（message 中含"xxx秒"）
-      const match = rateLimitMsg.value.match(/(\d+)\s*秒/)
-      if (match) {
-        const secs = parseInt(match[1])
+
+      // 按后端各限流类型匹配冷却策略
+      const secsMatch = msg.match(/等待\s*(\d+)\s*秒/)
+      if (secsMatch) {
+        // USER_QUESTION_COOLDOWN：题目冷却，后端明确告知秒数
+        const secs = parseInt(secsMatch[1])
+        rateLimitType.value = 'cooldown'
         rateLimitUntil.value = Date.now() + secs * 1000
         startCooldown(secs)
-      } else {
-        // 日级别限流，不设倒计时
+      } else if (msg.includes('每分钟')) {
+        // USER_MINUTE：分钟级用户限流，等待 60s
+        rateLimitType.value = 'cooldown'
+        rateLimitUntil.value = Date.now() + 60 * 1000
+        startCooldown(60)
+      } else if (msg.includes('明日') || msg.includes('今日')) {
+        // USER_DAY：日提交上限，不设倒计时，明日重置
+        rateLimitType.value = 'daily'
         rateLimitUntil.value = Date.now() + 86400 * 1000
+      } else if (msg.includes('人数过多')) {
+        // GLOBAL_SECOND：全局瞬时压力，稍等 10s 重试
+        rateLimitType.value = 'cooldown'
+        rateLimitUntil.value = Date.now() + 10 * 1000
+        startCooldown(10)
+      } else {
+        // IP_MINUTE 或其他：等待 60s
+        rateLimitType.value = 'cooldown'
+        rateLimitUntil.value = Date.now() + 60 * 1000
+        startCooldown(60)
       }
     } else {
       Message.error(err?.message || '提交失败，请稍后再试')
@@ -335,8 +357,13 @@ onUnmounted(() => {
           <!-- 提交按钮区 -->
           <div class="submit-area">
             <div v-if="rateLimitMsg" class="rate-limit-tip">
-              ⚠️ {{ rateLimitMsg }}
-              <span v-if="cooldownSeconds > 0">（{{ cooldownSeconds }}s 后恢复）</span>
+              <div class="rate-limit-main">⚠️ {{ rateLimitMsg }}</div>
+              <div v-if="cooldownSeconds > 0" class="rate-limit-sub">
+                请等待 <strong>{{ cooldownSeconds }}</strong> 秒后重新提交
+              </div>
+              <div v-else-if="rateLimitType === 'daily'" class="rate-limit-sub">
+                今日提交次数已达上限，明日 00:00 自动重置
+              </div>
             </div>
             <a-button
               type="primary"
@@ -345,7 +372,12 @@ onUnmounted(() => {
               :disabled="submitDisabled"
               @click="handleSubmit"
             >
-              {{ submitting ? '提交中...' : submitDisabled && cooldownSeconds > 0 ? `等待 ${cooldownSeconds}s` : '提交代码' }}
+              {{
+                submitting ? '提交中...'
+                : cooldownSeconds > 0 ? `冷却中（${cooldownSeconds}s）`
+                : rateLimitType === 'daily' ? '今日提交已达上限'
+                : '提交代码'
+              }}
             </a-button>
           </div>
 
@@ -505,11 +537,21 @@ onUnmounted(() => {
 }
 
 .rate-limit-tip {
-  font-size: 13px;
-  color: #ef4743;
   padding: 8px 12px;
   background: #fff2f0;
+  border: 1px solid #ffccc7;
   border-radius: 6px;
+}
+
+.rate-limit-main {
+  font-size: 13px;
+  color: #cf1322;
+}
+
+.rate-limit-sub {
+  font-size: 12px;
+  color: #ff7875;
+  margin-top: 4px;
 }
 
 .polling {

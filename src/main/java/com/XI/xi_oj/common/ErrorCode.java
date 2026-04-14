@@ -17,7 +17,10 @@ public enum ErrorCode {
     SYSTEM_ERROR(50000, "系统内部异常"),
     OPERATION_ERROR(50001, "操作失败"),
 
-    API_REQUEST_ERROR(50002, "API请求失败");
+    API_REQUEST_ERROR(50002, "API请求失败"),
+
+    // 新增：
+    TOO_MANY_REQUESTS(42900, "请求过于频繁，请稍后再试");
 
     /**
      * 状态码
