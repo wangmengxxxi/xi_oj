@@ -25,7 +25,6 @@ spring:
     username: root
     password: 123456
   # Redis 配置
-  # todo 需替换配置，然后取消注释
   data:
     redis:
       database: 1
@@ -33,12 +32,20 @@ spring:
       port: 6379
       timeout: 5000ms
 
-  # Elasticsearch 配置
-  # todo 需替换配置，然后取消注释
-#  elasticsearch:
-#    uris: http://localhost:9200
-#    username: root
-#    password: 123456
+  # 异步线程池（@Async 方法依赖，如 AiChatService.saveRecordAsync）
+  task:
+    execution:
+      pool:
+        core-size: 5
+        max-size: 20
+        queue-capacity: 200
+      thread-name-prefix: ai-async-
+    # 定时任务线程池（@Scheduled 向量同步依赖）
+    scheduling:
+      pool:
+        size: 3
+      thread-name-prefix: ai-schedule-
+
   # 文件上传
   servlet:
     multipart:
@@ -104,3 +111,13 @@ knife4j:
           - com.yupi.springbootinit.controller
 codesandbox:   # 第一级
   type: remote # 第二级
+
+# Milvus 向量库（部署在虚拟机）
+milvus:
+  host: 192.168.26.132
+  port: 19530
+
+# AI 模型配置（API Key 通过环境变量注入，禁止硬编码）
+ai:
+  model:
+    api-key: ${AI_API_KEY}   # 启动前需设置：export AI_API_KEY=sk-xxx

@@ -41,7 +41,7 @@ flowchart TD
 | 业务服务层 | 题库管理、代码判题、用户管理、评论管理、错题管理、提交记录管理、系统配置管理 | 保留OJ平台原有核心业务能力，新增用户管理、评论区、错题本等扩展功能，为AI层提供业务数据支撑 |
 | AIGC核心层 | RAG检索模块、Agent执行模块、大模型适配模块、工具调用模块 | 整个平台的AI能力核心，封装所有AI相关逻辑，与业务层完全解耦，通过工具调用对接业务能力 |
 | 数据存储层 | MySQL业务库、Milvus向量库、Redis缓存库 | 分别存储业务数据、AI向量知识库、高频缓存数据（AI问答、相似题检索结果） |
-| 基础设施层 | 代码沙箱、大模型API服务、日志监控、消息队列 | 提供底层能力支撑，包括代码运行、大模型调用、系统监控、异步任务处理 |
+| 基础设施层 | 代码沙箱、大模型API服务、日志监控 | 提供底层能力支撑，包括代码运行、大模型调用、系统监控。异步任务当前通过 `@Async` 实现，拆微服务后引入消息队列 |
 
 ### 2.3 AIGC核心层内部架构
 ```mermaid
@@ -70,7 +70,7 @@ flowchart LR
 | 前端框架 | Vue / React | 与现有项目一致 | 前端页面优化与新功能开发 |
 | 关系型数据库 | MySQL | 5.7+ / 8.0 | 业务数据存储，兼容现有question表等结构 |
 | 缓存数据库 | Redis | 6.0+ | 高频AI检索结果、用户会话、接口限流缓存 |
-| 消息队列 | RabbitMQ | 3.x+ | 异步处理AI任务、向量库数据同步、代码判题任务 |
+| 消息队列 | RabbitMQ | 3.x+ | 异步处理AI任务、向量库数据同步、代码判题任务（**当前单体阶段不引入，拆微服务后再接入**） |
 
 ### 3.2 AIGC专属技术栈
 | 技术领域 | 选型 | 版本要求 | 核心用途 | 选型理由 |
@@ -115,10 +115,13 @@ flowchart LR
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-data-redis</artifactId>
     </dependency>
+    <!-- RabbitMQ：当前单体阶段不引入，拆微服务后再添加此依赖 -->
+    <!--
     <dependency>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-amqp</artifactId>
     </dependency>
+    -->
     <dependency>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-validation</artifactId>
@@ -196,35 +199,29 @@ flowchart LR
 ```yaml
 spring:
   application:
-    name: oj-backend
+    name: springboot-init   # 与现有项目保持一致，勿随意修改
 
-  # 数据库
+  # 数据库（本机）
   datasource:
-    url: jdbc:mysql://${DB_HOST:localhost}:3306/${DB_NAME:oj_db}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
-    username: ${DB_USERNAME:root}
-    password: ${DB_PASSWORD:123456}
     driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/oj_db
+    username: root
+    password: 123456
 
-  # Redis
-  redis:
-    host: ${REDIS_HOST:localhost}
-    port: ${REDIS_PORT:6379}
-    password: ${REDIS_PASSWORD:}
-    database: 0
-    timeout: 3000ms
-    lettuce:
-      pool:
-        max-active: 8
-        max-idle: 8
-        min-idle: 0
+  # Redis（本机）
+  data:
+    redis:
+      database: 1
+      host: localhost
+      port: 6379
+      timeout: 5000ms
 
-  # RabbitMQ
-  rabbitmq:
-    host: ${RABBITMQ_HOST:localhost}
-    port: ${RABBITMQ_PORT:5672}
-    username: ${RABBITMQ_USERNAME:guest}
-    password: ${RABBITMQ_PASSWORD:guest}
-    virtual-host: /
+  # RabbitMQ：当前单体阶段不引入，拆微服务后再配置
+  # rabbitmq:
+  #   host: 192.168.26.132
+  #   port: 5672
+  #   username: guest
+  #   password: guest
 
   # 异步线程池（@Async 方法依赖，如 AiChatService.saveRecordAsync）
   task:
@@ -233,42 +230,33 @@ spring:
         core-size: 5
         max-size: 20
         queue-capacity: 200
-        keep-alive: 60s
       thread-name-prefix: ai-async-
-
-  # 定时任务线程池（@Scheduled 定时同步依赖）
-  task:
+    # 定时任务线程池（@Scheduled 向量同步依赖）
     scheduling:
       pool:
         size: 3
       thread-name-prefix: ai-schedule-
 
-# Milvus 向量库（主机/端口支持环境变量覆盖，容器化部署时注入）
+# Milvus 向量库（虚拟机，固定地址）
 milvus:
-  host: ${MILVUS_HOST:localhost}
-  port: ${MILVUS_PORT:19530}
+  host: 192.168.26.132
+  port: 19530
 
-# AI 模型（API Key 必须通过环境变量设置：export AI_API_KEY=sk-xxx）
+# AI 模型（API Key 必须通过环境变量注入，禁止硬编码）
 ai:
   model:
-    api-key: ${AI_API_KEY}   # ⚠️ 必填，不得硬编码
+    api-key: ${AI_API_KEY}   # ⚠️ 启动前必须设置：export AI_API_KEY=sk-xxx
 
-# MyBatis-Plus
+# MyBatis-Plus（与现有项目保持一致）
 mybatis-plus:
   configuration:
-    map-underscore-to-camel-case: true
+    map-underscore-to-camel-case: false   # 项目使用原始字段名，勿改为 true
     log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
   global-config:
     db-config:
       logic-delete-field: isDelete
       logic-delete-value: 1
       logic-not-delete-value: 0
-
-# 日志
-logging:
-  level:
-    com.xi.oj: INFO
-    dev.langchain4j: WARN
 ```
 
 **主启动类需添加的注解（缺一不可）**：
@@ -2389,7 +2377,7 @@ flowchart LR
     B --> D[SpringBoot后端服务]
     D --> E[MySQL]
     D --> F[Redis]
-    D --> G[RabbitMQ]
+    D --> G[RabbitMQ（微服务阶段引入）]
     D --> H[Milvus向量库]
     D --> I[代码沙箱服务]
     D --> J[大模型API]
@@ -2417,7 +2405,7 @@ flowchart LR
 
 ### 8.2 性能优化方案
 1. **缓存优化**：对高频题目解析、相似题检索结果、AI问答内容、错题分析进行Redis缓存，缓存有效期1小时，减少重复计算与API调用；
-2. **异步优化**：代码分析、错题分析、向量库数据同步等耗时操作，通过消息队列异步处理，不阻塞用户主流程；
+2. **异步优化**：代码分析、错题分析等耗时操作，当前通过 `@Async` 线程池异步处理，不阻塞用户主流程；向量库数据同步通过 `@Scheduled` 定时任务实现（拆微服务后再替换为消息队列）；
 3. **RAG优化**：采用「关键词检索+向量检索」的混合检索模式，提升检索精准度与速度；对知识点精细化分割，减少检索噪声；
 4. **大模型优化**：调整大模型参数，temperature设置为0.1-0.3，减少随机性；maxTokens按需设置，避免无效token消耗，提升响应速度。
 
