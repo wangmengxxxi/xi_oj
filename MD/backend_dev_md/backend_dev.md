@@ -445,6 +445,10 @@ CREATE TABLE IF NOT EXISTS ai_wrong_question
 
 #### 5.1.1 RAG检索模块
 **核心职责**：为AI提供精准的上下文信息，解决大模型幻觉问题，保证回答的准确性。
+
+> **架构决策：不做混合检索（BM25+向量）**
+> 当前知识库规模 100-600 条，所有查询均为中长文本（题目标题+考点+题干拼接），向量检索在此场景下精度最优；`content_type` 元数据过滤已等效替代关键词过滤的核心收益。混合检索在知识库超过万条、或出现大量短关键词查询时再引入，当前引入只增加工程复杂度，无实质精度提升。
+
 **核心流程**：
 ```mermaid
 flowchart TD
@@ -452,7 +456,7 @@ flowchart TD
     B --> C[生成问题向量]
     C --> D[向量库检索]
     D --> E[相似度过滤（阈值≥0.7）]
-    E --> F[上下文压缩与重排序]
+    E --> F[content_type 元数据二次过滤]
     F --> G[返回给Agent的精准上下文]
 ```
 
@@ -537,6 +541,157 @@ public class OJKnowledgeRetriever {
     }
 }
 ```
+
+#### 5.1.1.1 RAG 优化方向一：知识点分块规范（200-400字/条）
+
+> **原则**：每条知识点独立、完整，过长则拆分，过短则合并。分块质量是比混合检索更有效的精度提升手段。
+
+**知识文件分块规范（实操指南）**：
+```
+# 每条 --- 分隔的条目控制在 200-400 汉字（约 400-800 token）
+# ✅ 好的分块（独立、完整）：
+content_type: 知识点
+tag: 二分查找
+title: 二分查找边界条件处理
+
+二分查找最容易出错的地方是循环条件和边界更新...（200-400字完整讲解）
+
+---
+content_type: 知识点
+tag: 二分查找
+title: 二分查找时间复杂度分析
+
+二分查找每次将搜索范围缩小一半...（独立的另一知识点）
+
+# ❌ 坏的分块（太短或太宽泛）：
+content_type: 知识点
+tag: 算法
+title: 常见算法合集
+
+一、排序算法：... 二、查找算法：... 三、图算法：...（包含太多主题，检索时语义稀释）
+```
+
+**检验标准**：对任意一条 text，遮住 metadata 后能否独立回答一个具体问题？能则合格，不能则需拆分或补充。
+
+---
+
+#### 5.1.1.2 RAG 优化方向二：丰富 metadata 字段（精准过滤）
+
+在现有 `content_type`、`tag` 基础上，为题目类型数据补充 `difficulty` 和 `algorithm_type` 字段，使 `retrieveByType` 能更精准地缩小候选集。
+
+**向量库导入时的 metadata 增强（修改 `QuestionVectorSyncJob`）**：
+```java
+// 在 QuestionVectorSyncJob.syncQuestionsToMilvus() 中增强 metadata
+Metadata metadata = Metadata.from(Map.of(
+        "question_id",   q.getId(),
+        "content_type",  "题目",
+        "tag",           String.join(",", q.getTags()),      // 原有
+        "difficulty",    q.getDifficulty(),                  // ← 新增：简单/中等/困难
+        "algorithm_type", inferAlgorithmType(q.getTags())   // ← 新增：查找/排序/DP/图/贪心等
+));
+```
+
+**算法类型推断辅助方法**：
+```java
+/**
+ * 根据题目标签推断算法大类，用于 metadata 精准过滤
+ * 标签到算法大类的映射，可按实际题库标签扩充
+ */
+private String inferAlgorithmType(List<String> tags) {
+    Map<String, String> tagToType = Map.of(
+            "动态规划", "DP",  "DP", "DP",
+            "二分查找", "查找", "哈希表", "查找",
+            "排序", "排序", "快速排序", "排序", "归并排序", "排序",
+            "图", "图", "BFS", "图", "DFS", "图", "最短路", "图",
+            "贪心", "贪心", "双指针", "双指针", "滑动窗口", "双指针",
+            "栈", "数据结构", "队列", "数据结构", "堆", "数据结构"
+    );
+    return tags.stream()
+            .map(t -> tagToType.getOrDefault(t, ""))
+            .filter(t -> !t.isEmpty())
+            .findFirst()
+            .orElse("综合");
+}
+```
+
+**在 `retrieveByType` 中按 difficulty 额外过滤（可选）**：
+```java
+/**
+ * 支持难度过滤的检索方法（新增重载，向后兼容）
+ * 典型用途：错题分析时只检索相同难度的错题分析案例
+ */
+public String retrieveByTypeAndDifficulty(String query, String contentTypes,
+                                           String difficulty, int topK, double minScore) {
+    Embedding queryEmbedding = embeddingModel.embed(query).content();
+    List<String> typeList = Arrays.asList(contentTypes.split(","));
+    List<EmbeddingMatch<TextSegment>> matches = embeddingStore.findRelevant(queryEmbedding, topK * 2);
+    String context = matches.stream()
+            .filter(m -> m.score() >= minScore)
+            .filter(m -> typeList.contains(m.embeddedObject().metadata().getString("content_type")))
+            .filter(m -> difficulty == null ||
+                    difficulty.equals(m.embeddedObject().metadata().getString("difficulty")))
+            .limit(topK)
+            .map(m -> m.embeddedObject().text())
+            .collect(Collectors.joining("\n\n"));
+    return context.isBlank() ? "无相关知识点" : context;
+}
+```
+
+---
+
+#### 5.1.1.3 RAG 优化方向三：相似题推荐 tag 前置过滤
+
+> **问题**：当前 `retrieveSimilarQuestion` 直接对全库进行向量检索，语义相似但考点完全不同的题目（如「动态规划题」与「字符串题」）可能因表述相似而被误召回。
+>
+> **优化**：先按 tag 交集筛选候选集，再做向量排序，相当于「粗筛 + 精排」两阶段策略，不引入任何新依赖。
+
+```java
+/**
+ * 相似题推荐（优化版）：tag 前置过滤 + 向量排序
+ * 两阶段策略：先按 tag 缩小候选集，再用向量相似度排序取 top3
+ *
+ * @param questionId      当前题目ID（排除自身）
+ * @param questionContent 当前题目内容（用于向量化）
+ * @param tags            当前题目标签列表（用于 tag 前置过滤）
+ */
+public List<Long> retrieveSimilarQuestionByTag(Long questionId,
+                                                String questionContent,
+                                                List<String> tags) {
+    Embedding queryEmbedding = embeddingModel.embed(questionContent).content();
+    // 多取候选（tag过滤会淘汰部分结果）
+    List<EmbeddingMatch<TextSegment>> candidates = embeddingStore.findRelevant(queryEmbedding, 20);
+
+    return candidates.stream()
+            .filter(m -> m.score() >= 0.65)                           // 稍降阈值，留出 tag 过滤空间
+            .filter(m -> {
+                // tag 交集过滤：至少有1个相同考点标签
+                String metaTag = m.embeddedObject().metadata().getString("tag");
+                if (metaTag == null) return false;
+                List<String> metaTags = Arrays.asList(metaTag.split(","));
+                return tags.stream().anyMatch(metaTags::contains);
+            })
+            .filter(m -> {
+                Long id = m.embeddedObject().metadata().getLong("question_id");
+                return id != null && !id.equals(questionId);
+            })
+            .sorted(Comparator.comparingDouble(EmbeddingMatch::score).reversed())
+            .limit(3)
+            .map(m -> m.embeddedObject().metadata().getLong("question_id"))
+            .collect(Collectors.toList());
+}
+```
+
+**在 `AiQuestionParseService` 中使用优化版方法**：
+```java
+public List<Long> getSimilarQuestions(QuestionVO question) {
+    // 使用 tag 前置过滤版本，相似题考点更精准
+    List<String> tags = JSON.parseArray(question.getTags(), String.class);
+    return ojKnowledgeRetriever.retrieveSimilarQuestionByTag(
+            question.getId(), question.getContent(), tags);
+}
+```
+
+---
 
 #### 5.1.2 Agent执行模块
 **核心职责**：负责AI的思考决策、工具调用、结果整合，实现代码分析、问答、判题、错题分析等核心AI功能。
@@ -2406,7 +2561,7 @@ flowchart LR
 ### 8.2 性能优化方案
 1. **缓存优化**：对高频题目解析、相似题检索结果、AI问答内容、错题分析进行Redis缓存，缓存有效期1小时，减少重复计算与API调用；
 2. **异步优化**：代码分析、错题分析等耗时操作，当前通过 `@Async` 线程池异步处理，不阻塞用户主流程；向量库数据同步通过 `@Scheduled` 定时任务实现（拆微服务后再替换为消息队列）；
-3. **RAG优化**：采用「关键词检索+向量检索」的混合检索模式，提升检索精准度与速度；对知识点精细化分割，减少检索噪声；
+3. **RAG优化**：当前规模（百~千条）下纯向量检索已足够精准，`content_type` 元数据过滤进一步缩小搜索空间；知识点精细化分割（每条控制在200-400字）是比混合检索更有效的提升手段。混合检索（BM25+向量）在知识库超过万条、或出现大量短关键词查询时再引入；
 4. **大模型优化**：调整大模型参数，temperature设置为0.1-0.3，减少随机性；maxTokens按需设置，避免无效token消耗，提升响应速度。
 
 ## 九、附录
