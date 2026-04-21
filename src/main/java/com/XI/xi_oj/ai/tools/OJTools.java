@@ -2,9 +2,11 @@ package com.XI.xi_oj.ai.tools;
 
 import com.XI.xi_oj.judge.JudgeService;
 import com.XI.xi_oj.model.dto.judge.JudgeResultDTO;
+import com.XI.xi_oj.model.dto.question.WrongQuestionVO;
 import com.XI.xi_oj.model.vo.QuestionVO;
 import com.XI.xi_oj.service.AiJudgeService;
 import com.XI.xi_oj.service.QuestionService;
+import com.XI.xi_oj.service.WrongQuestionService;
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import org.springframework.beans.factory.annotation.Autowired;

@@ -83,6 +83,19 @@ public class QuestionVO implements Serializable {
     private UserVO userVO;
 
     /**
+     * 题目标准答案
+     * 来源：Question.answer（通过 BeanUtils.copyProperties 自动复制）
+     * 注意：返回给普通用户时 Controller 层可将此字段置 null
+     */
+    private String answer;
+    /**
+     * 题目难度（easy / medium / hard）
+     * 注意：当前 question 表无 difficulty 列，此字段默认为 null。
+     * 后续在 question 表新增 difficulty varchar(16) 列并在 Question 实体添加对应字段后自动生效。
+     */
+    private String difficulty;
+
+    /**
      * 包装类转对象
      *
      * @param questionVO

@@ -35,6 +35,14 @@ public class QuestionSubmit implements Serializable {
     private String judgeInfo;
 
     /**
+     * 提交来源（null / "" = 用户正常提交；"ai_tool" = AI 工具调用的测试性提交）
+     * 用途：将 Agent judgeUserCode 工具调用产生的判题记录与用户正常提交隔离，
+     *       避免 AI 测试行为影响 solved_num / submit_num / question.acceptedNum 统计
+     * 对应 DDL：ALTER TABLE question_submit ADD COLUMN source varchar(32) DEFAULT NULL ...
+     */
+    private String source;
+
+    /**
      * 判题状态（0 - 待判题、1 - 判题中、2 - 成功、3 - 失败）
      */
     private Integer status;

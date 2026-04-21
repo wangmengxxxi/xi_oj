@@ -50,5 +50,13 @@ public interface QuestionService extends IService<Question> {
      * @return
      */
     Page<QuestionVO> getQuestionVOPage(Page<Question> questionPage, HttpServletRequest request);
-    
+
+    /**
+     * 按关键词查询题目
+     * 优先按 ID 精确匹配（keyword 可解析为 Long 时），降级为标题模糊搜索
+     *
+     * @param keyword 题目ID（数字字符串）或标题关键词
+     * @return 匹配的 QuestionVO；未找到时返回 null
+     */
+    QuestionVO getByKeyword(String keyword);
 }

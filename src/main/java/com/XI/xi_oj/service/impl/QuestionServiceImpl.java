@@ -157,6 +157,30 @@ public class QuestionServiceImpl extends ServiceImpl<QuestionMapper, Question>
     }
 
 
+    @Override
+    public QuestionVO getByKeyword(String keyword) {
+        if (keyword == null || keyword.isBlank()) {
+            return null;
+        }
+        // 1. 优先 ID 精确查找
+        try {
+            long id = Long.parseLong(keyword.trim());
+            Question question = this.getById(id);
+            if (question != null && question.getIsDelete() == 0) {
+                return QuestionVO.objToVo(question);
+            }
+        } catch (NumberFormatException ignored) {
+            // 非数字字符串，走标题模糊查找
+        }
+        // 2. 标题模糊查找，取第一条匹配
+        QueryWrapper<Question> wrapper = new QueryWrapper<>();
+        wrapper.like("title", keyword)
+                .eq("isDelete", 0)
+                .last("LIMIT 1");
+        Question question = this.getOne(wrapper);
+        return QuestionVO.objToVo(question);
+    }
+
 }
 
 
