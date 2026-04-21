@@ -1,7 +1,12 @@
-# XI OJ 平台AIGC能力整合与功能拓展设计
-文档版本：V1.0
+﻿# XI OJ 平台AIGC能力整合与功能拓展设计
+文档版本：V1.1
 适用范围：IOJ平台现有项目二次开发、AIGC能力落地
-更新日期：2026年03月
+更新日期：2026年04月
+
+> **当前落地状态（2026-04-16）**
+> 1. 当前仓库已完成 AIGC 相关依赖、配置与 SQL 预埋（LangChain4j / DashScope / Milvus / `ai.sql`），但 AI 业务代码尚未正式落地；
+> 2. 本文档中带完整代码块的章节为“目标实现方案”，需按现有项目基线（Java 21、Spring Boot 3.3.x、`server.servlet.context-path=/api`）进行适配；
+> 3. 现有提交限流（submit 维度）已上线，AI 专属限流维度为待扩展项（见 5.9）。
 
 ## 一、方案概述
 ### 1.1 项目背景
@@ -16,7 +21,7 @@
 ### 1.3 适配范围
 - 完全兼容现有OJ平台的Java SpringBoot技术栈、MySQL数据库、代码沙箱判题体系；
 - 完全适配「AI判题、AI助手自动回复、AI分析题目、AI分析提交代码、AI问答、AI开关、用户信息管理、评论区、AI错题本」的功能需求；
-- 支持Java 8及以上版本，兼容LangChain4j全版本核心能力。
+- 兼容当前项目基线：**Java 21（最低 Java 17）+ Spring Boot 3.3.x**，兼容 LangChain4j 1.0.0-beta3 方案。
 
 ## 二、整体架构设计
 本方案采用**分层解耦架构**，将AIGC能力作为独立的核心层封装，与现有业务系统完全解耦，既保证现有功能的稳定性，又支持后续能力的快速迭代。
@@ -65,8 +70,8 @@ flowchart LR
 ### 3.1 基础技术栈
 | 技术领域 | 选型 | 版本要求 | 核心用途 |
 |----------|------|----------|----------|
-| 开发语言 | Java | JDK 8+ | 后端核心开发，完全兼容现有项目 |
-| 后端框架 | Spring Boot | 2.7+ / 3.x | 项目核心框架，适配现有业务代码 |
+| 开发语言 | Java | JDK 21（最低17） | 后端核心开发，与当前项目基线一致 |
+| 后端框架 | Spring Boot | 3.3.x | 项目核心框架，适配现有业务代码 |
 | 前端框架 | Vue / React | 与现有项目一致 | 前端页面优化与新功能开发 |
 | 关系型数据库 | MySQL | 5.7+ / 8.0 | 业务数据存储，兼容现有question表等结构 |
 | 缓存数据库 | Redis | 6.0+ | 高频AI检索结果、用户会话、接口限流缓存 |
@@ -75,13 +80,17 @@ flowchart LR
 ### 3.2 AIGC专属技术栈
 | 技术领域 | 选型 | 版本要求 | 核心用途 | 选型理由 |
 |----------|------|----------|----------|----------|
-| AI应用框架 | LangChain4j | 0.32.0+ | Agent、RAG、工具调用的核心实现 | Java生态原生适配，与项目技术栈完全兼容，官方持续维护 |
+| AI应用框架 | LangChain4j | 1.0.0-beta3（与 BOM 一致） | Agent、RAG、工具调用的核心实现 | Java生态原生适配，与项目技术栈完全兼容，官方持续维护 |
 | SSE流式输出 | langchain4j-reactor | 与LangChain4j BOM一致 | 将 AiServices 接口返回值适配为 `Flux<String>`，支持 SSE 推流 | 官方 Reactor 适配模块，无需手写回调，与 Spring WebFlux 无缝集成 |
 | 向量数据库 | Milvus | 2.3+ | 题目、题解、算法知识点的向量化存储与检索 | 开源轻量，Java生态适配好，支持单机部署，满足中小规模数据需求 |
 | 大模型 | 阿里百炼 qwen-plus | - | 文本生成、代码分析、问答交互核心 | 国内合规可访问，代码理解能力强，支持长上下文，阿里百炼平台按量计费，适配OJ场景 |
 | 嵌入模型 | 阿里百炼 text-embedding-v3 | - | 文本向量化生成 | 中文适配性强，默认维度1024可配置，与主模型生态统一 |
 
 ### 3.3 项目核心依赖（pom.xml）
+> **与当前仓库对齐说明（2026-04-16）**
+> - 已引入：`langchain4j`、`langchain4j-community-dashscope`、`langchain4j-milvus`；
+> - 尚未引入（按需在 AI 流式阶段补充）：`spring-boot-starter-webflux`、`langchain4j-reactor`、`caffeine`。
+
 ```xml
 <!-- BOM放在 dependencyManagement 中统一管理版本，避免版本冲突 -->
 <dependencyManagement>
@@ -195,6 +204,8 @@ flowchart LR
 ### 3.4 application.yml 完整配置参考
 
 > **开发注意**：以下配置涵盖 Milvus、异步线程池、@Scheduled 等关键项，缺少任意一项均可能导致启动失败或功能异常。所有敏感值（密码、Key）统一通过环境变量注入。
+>
+> **路径口径说明**：当前项目已配置 `server.servlet.context-path=/api`，因此 Controller 示例中应写业务相对路径（如 `/ai/chat`），对外访问路径才是 `/api/ai/chat`。
 
 ```yaml
 spring:
@@ -262,14 +273,17 @@ mybatis-plus:
 **主启动类需添加的注解（缺一不可）**：
 ```java
 @SpringBootApplication
+@MapperScan("com.XI.xi_oj.mapper")
 @EnableScheduling  // ← 5.10 定时同步 QuestionVectorSyncJob 依赖此注解
 @EnableAsync       // ← 5.3 AiChatService.saveRecordAsync 依赖此注解
-public class OJApplication {
+@EnableAspectJAutoProxy(proxyTargetClass = true, exposeProxy = true)
+public class MainApplication {
     public static void main(String[] args) {
-        SpringApplication.run(OJApplication.class, args);
+        SpringApplication.run(MainApplication.class, args);
     }
 }
 ```
+> 注：当前仓库主类已包含 `@EnableScheduling` 与 `@EnableAspectJAutoProxy`，尚未启用 `@EnableAsync`，AI 流式落地前需补齐。
 
 ---
 
@@ -429,12 +443,12 @@ CREATE TABLE IF NOT EXISTS ai_wrong_question
 | text | varchar | 原始文本内容 |
 | question_id | bigint | 关联题目id（可选） |
 | tag | varchar | 标签/考点（如哈希表、动态规划） |
-| difficulty | varchar | 难度（简单/中等/困难） |
+| difficulty | varchar | 难度（可选扩展字段；当前 `question` 实体无该字段） |
 | content_type | varchar | 内容类型（题目/题解/知识点/代码模板/错题分析） |
 
 #### 4.3.2 存储内容范围
 仅存储RAG检索所需的核心内容，避免无效数据引入噪声：
-1. **题目核心信息**：title标题、content题干、tags标签、answer标准答案；
+1. **题目核心信息**：title标题、content题干、tags标签（**不存标准答案，避免泄题风险**）；
 2. **题解与知识点**：分步骤解题思路、算法考点讲解、代码模板、常见错误分析；
 3. **相似题关联数据**：题目标签、考点、难度匹配信息；
 4. **错题分析数据**：典型错误代码、错误原因分析、修正思路。
@@ -484,16 +498,20 @@ public class OJKnowledgeRetriever {
         // 1. 生成问题向量
         Embedding queryEmbedding = embeddingModel.embed(query).content();
         
-        // 2. 向量库检索
-        List<EmbeddingMatch<TextSegment>> matches = embeddingStore.findRelevant(queryEmbedding, topK);
-        
-        // 3. 相似度过滤与内容拼接
+        // 2. 向量库检索（LangChain4j 1.0.0-beta3 新 API，minScore 在 builder 中服务端过滤）
+        EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
+                .queryEmbedding(queryEmbedding)
+                .maxResults(topK)
+                .minScore(minScore)
+                .build();
+        List<EmbeddingMatch<TextSegment>> matches = embeddingStore.search(searchRequest).matches();
+
+        // 3. 内容拼接（空值防护）
         String context = matches.stream()
-                .filter(match -> match.score() >= minScore)
-                .map(EmbeddingMatch::embeddedObject)
-                .map(TextSegment::text)
+                .filter(match -> match.embedded() != null)
+                .map(match -> match.embedded().text())
                 .collect(Collectors.joining("\n\n"));
-        
+
         // 4. 兜底返回
         return context.isBlank() ? "无相关知识点" : context;
     }
@@ -506,11 +524,15 @@ public class OJKnowledgeRetriever {
      */
     public List<Long> retrieveSimilarQuestion(Long questionId, String questionContent) {
         Embedding queryEmbedding = embeddingModel.embed(questionContent).content();
-        return embeddingStore.findRelevant(queryEmbedding, 4)
-                .stream()
-                .filter(match -> match.score() >= 0.75)
-                .map(EmbeddingMatch::embeddedObject)
-                .map(segment -> segment.metadata().getLong("question_id"))
+        List<EmbeddingMatch<TextSegment>> matches = embeddingStore.search(
+                EmbeddingSearchRequest.builder()
+                        .queryEmbedding(queryEmbedding)
+                        .maxResults(4)
+                        .minScore(0.75)
+                        .build()).matches();
+        return matches.stream()
+                .filter(match -> match.embedded() != null)
+                .map(match -> match.embedded().metadata().getLong("question_id"))
                 .filter(id -> !id.equals(questionId))
                 .collect(Collectors.toList());
     }
@@ -527,15 +549,19 @@ public class OJKnowledgeRetriever {
     public String retrieveByType(String query, String contentTypes, int topK, double minScore) {
         Embedding queryEmbedding = embeddingModel.embed(query).content();
         List<String> typeList = Arrays.asList(contentTypes.split(","));
-        // 多取一倍以保证过滤后仍有足够结果
-        List<EmbeddingMatch<TextSegment>> matches = embeddingStore.findRelevant(queryEmbedding, topK * 2);
+        // 多取一倍以保证 content_type 过滤后仍有足够结果
+        List<EmbeddingMatch<TextSegment>> matches = embeddingStore.search(
+                EmbeddingSearchRequest.builder()
+                        .queryEmbedding(queryEmbedding)
+                        .maxResults(topK * 2)
+                        .minScore(minScore)
+                        .build()).matches();
         String context = matches.stream()
-                .filter(match -> match.score() >= minScore)
+                .filter(match -> match.embedded() != null)
                 .filter(match -> typeList.contains(
-                        match.embeddedObject().metadata().getString("content_type")))
+                        match.embedded().metadata().getString("content_type")))
                 .limit(topK)
-                .map(EmbeddingMatch::embeddedObject)
-                .map(TextSegment::text)
+                .map(match -> match.embedded().text())
                 .collect(Collectors.joining("\n\n"));
         return context.isBlank() ? "无相关知识点" : context;
     }
@@ -544,6 +570,10 @@ public class OJKnowledgeRetriever {
 
 #### 5.1.1.1 RAG 优化方向一：知识点分块规范（200-400字/条）
 
+> **当前项目落地状态（2026-04-20）**
+> - 文档层已明确 `knowledge/*.md` 的 `---` 分块规范（200-400字/条）与质检标准；
+> - 仓库中尚未落地独立的知识导入任务类（如 `KnowledgeInitializer` / `QuestionVectorSyncJob`），分块长度校验与入库前告警仍为待实现项；
+> - 建议在后续导入实现的 `parseAndStore` 流程中新增“超长拆分、过短合并、异常条目跳过并记录日志”三项保护。
 > **原则**：每条知识点独立、完整，过长则拆分，过短则合并。分块质量是比混合检索更有效的精度提升手段。
 
 **知识文件分块规范（实操指南）**：
@@ -577,18 +607,24 @@ title: 常见算法合集
 
 #### 5.1.1.2 RAG 优化方向二：丰富 metadata 字段（精准过滤）
 
-在现有 `content_type`、`tag` 基础上，为题目类型数据补充 `difficulty` 和 `algorithm_type` 字段，使 `retrieveByType` 能更精准地缩小候选集。
+> **当前项目落地状态（2026-04-20）**
+> - `src/main/java/com/XI/xi_oj/ai/OJKnowledgeRetriever.java` 的 `retrieveByType(...)` 已支持基于 `content_type` 的二次过滤；
+> - `algorithm_type` / `difficulty` 元数据增强链路（向量同步时写入 + 检索时过滤）尚未在仓库形成完整实现；
+> - 本节 `inferAlgorithmType` 与 `retrieveByTypeAndDifficulty` 代码可作为下一阶段落地模板。
+在现有 `content_type`、`tag` 基础上，优先补充 `algorithm_type` 字段；`difficulty` 建议作为后续题库字段扩展后再接入，使 `retrieveByType` 能更精准地缩小候选集。
 
 **向量库导入时的 metadata 增强（修改 `QuestionVectorSyncJob`）**：
 ```java
 // 在 QuestionVectorSyncJob.syncQuestionsToMilvus() 中增强 metadata
-Metadata metadata = Metadata.from(Map.of(
-        "question_id",   q.getId(),
-        "content_type",  "题目",
-        "tag",           String.join(",", q.getTags()),      // 原有
-        "difficulty",    q.getDifficulty(),                  // ← 新增：简单/中等/困难
-        "algorithm_type", inferAlgorithmType(q.getTags())   // ← 新增：查找/排序/DP/图/贪心等
-));
+String tagText = q.getTags(); // 当前项目中 tags 为 JSON 字符串
+Map<String, Object> metadataMap = new HashMap<>();
+metadataMap.put("question_id", q.getId());
+metadataMap.put("content_type", "题目");
+metadataMap.put("tag", tagText);                              // 原有
+metadataMap.put("algorithm_type", inferAlgorithmType(tagText)); // ← 新增：查找/排序/DP/图/贪心等
+// 若后续为 question 增加 difficulty 字段，再追加：
+// metadataMap.put("difficulty", q.getDifficulty());
+Metadata metadata = Metadata.from(metadataMap);
 ```
 
 **算法类型推断辅助方法**：
@@ -597,7 +633,7 @@ Metadata metadata = Metadata.from(Map.of(
  * 根据题目标签推断算法大类，用于 metadata 精准过滤
  * 标签到算法大类的映射，可按实际题库标签扩充
  */
-private String inferAlgorithmType(List<String> tags) {
+private String inferAlgorithmType(String tagText) {
     Map<String, String> tagToType = Map.of(
             "动态规划", "DP",  "DP", "DP",
             "二分查找", "查找", "哈希表", "查找",
@@ -606,6 +642,7 @@ private String inferAlgorithmType(List<String> tags) {
             "贪心", "贪心", "双指针", "双指针", "滑动窗口", "双指针",
             "栈", "数据结构", "队列", "数据结构", "堆", "数据结构"
     );
+    List<String> tags = JSONUtil.toList(tagText, String.class);
     return tags.stream()
             .map(t -> tagToType.getOrDefault(t, ""))
             .filter(t -> !t.isEmpty())
@@ -624,14 +661,19 @@ public String retrieveByTypeAndDifficulty(String query, String contentTypes,
                                            String difficulty, int topK, double minScore) {
     Embedding queryEmbedding = embeddingModel.embed(query).content();
     List<String> typeList = Arrays.asList(contentTypes.split(","));
-    List<EmbeddingMatch<TextSegment>> matches = embeddingStore.findRelevant(queryEmbedding, topK * 2);
+    List<EmbeddingMatch<TextSegment>> matches = embeddingStore.search(
+            EmbeddingSearchRequest.builder()
+                    .queryEmbedding(queryEmbedding)
+                    .maxResults(topK * 2)
+                    .minScore(minScore)
+                    .build()).matches();
     String context = matches.stream()
-            .filter(m -> m.score() >= minScore)
-            .filter(m -> typeList.contains(m.embeddedObject().metadata().getString("content_type")))
+            .filter(m -> m.embedded() != null)
+            .filter(m -> typeList.contains(m.embedded().metadata().getString("content_type")))
             .filter(m -> difficulty == null ||
-                    difficulty.equals(m.embeddedObject().metadata().getString("difficulty")))
+                    difficulty.equals(m.embedded().metadata().getString("difficulty")))
             .limit(topK)
-            .map(m -> m.embeddedObject().text())
+            .map(m -> m.embedded().text())
             .collect(Collectors.joining("\n\n"));
     return context.isBlank() ? "无相关知识点" : context;
 }
@@ -641,6 +683,10 @@ public String retrieveByTypeAndDifficulty(String query, String contentTypes,
 
 #### 5.1.1.3 RAG 优化方向三：相似题推荐 tag 前置过滤
 
+> **当前项目落地状态（2026-04-20）**
+> - 当前实现为 `retrieveSimilarQuestions(Long questionId, String questionContent)`，仅做向量相似度召回与自身题目排除；
+> - 文档中的 `retrieveSimilarQuestionByTag(...)`（tag 前置过滤）及 `AiQuestionParseService` 对接尚未在仓库落地；
+> - 该优化属于“待实现增强项”，建议按“tag 粗筛 + 向量精排”两阶段补齐。
 > **问题**：当前 `retrieveSimilarQuestion` 直接对全库进行向量检索，语义相似但考点完全不同的题目（如「动态规划题」与「字符串题」）可能因表述相似而被误召回。
 >
 > **优化**：先按 tag 交集筛选候选集，再做向量排序，相当于「粗筛 + 精排」两阶段策略，不引入任何新依赖。
@@ -658,25 +704,30 @@ public List<Long> retrieveSimilarQuestionByTag(Long questionId,
                                                 String questionContent,
                                                 List<String> tags) {
     Embedding queryEmbedding = embeddingModel.embed(questionContent).content();
-    // 多取候选（tag过滤会淘汰部分结果）
-    List<EmbeddingMatch<TextSegment>> candidates = embeddingStore.findRelevant(queryEmbedding, 20);
+    // 多取候选（tag过滤会淘汰部分结果），minScore 0.65 在服务端过滤，减少网络传输
+    List<EmbeddingMatch<TextSegment>> candidates = embeddingStore.search(
+            EmbeddingSearchRequest.builder()
+                    .queryEmbedding(queryEmbedding)
+                    .maxResults(20)
+                    .minScore(0.65)
+                    .build()).matches();
 
     return candidates.stream()
-            .filter(m -> m.score() >= 0.65)                           // 稍降阈值，留出 tag 过滤空间
+            .filter(m -> m.embedded() != null)
             .filter(m -> {
                 // tag 交集过滤：至少有1个相同考点标签
-                String metaTag = m.embeddedObject().metadata().getString("tag");
+                String metaTag = m.embedded().metadata().getString("tag");
                 if (metaTag == null) return false;
                 List<String> metaTags = Arrays.asList(metaTag.split(","));
                 return tags.stream().anyMatch(metaTags::contains);
             })
             .filter(m -> {
-                Long id = m.embeddedObject().metadata().getLong("question_id");
+                Long id = m.embedded().metadata().getLong("question_id");
                 return id != null && !id.equals(questionId);
             })
             .sorted(Comparator.comparingDouble(EmbeddingMatch::score).reversed())
             .limit(3)
-            .map(m -> m.embeddedObject().metadata().getLong("question_id"))
+            .map(m -> m.embedded().metadata().getLong("question_id"))
             .collect(Collectors.toList());
 }
 ```
@@ -693,7 +744,291 @@ public List<Long> getSimilarQuestions(QuestionVO question) {
 
 ---
 
-#### 5.1.2 Agent执行模块
+#### 5.1.1.4 RAG 优化方向四：检索结果 Redis 缓存（TTL 1小时）
+
+> **当前项目落地状态（2026-04-20）**
+> - 已落地：`retrieve(...)` 入口 Redis 缓存（Key=MD5(query|topK|minScore)，TTL=60分钟）；
+> - 代码口径：当前项目使用 `TimeUtil.minutes(RAG_CACHE_TTL_MINUTES)` 设置过期时间；
+> - 待补齐：`retrieveByType(...)`、`retrieveSimilarQuestions(...)` 的同构缓存，以及 `clearRagCache()` 管理入口。
+> **问题**：同一道题目被不同用户反复触发 AI 解析时，`OJKnowledgeRetriever` 每次都需要调用 Embedding 模型生成向量、再请求 Milvus 检索，产生额外 API 费用与 RT 延迟。对于同一 query 字符串，检索结果在知识库未更新时完全幂等，完全可以缓存复用。
+>
+> **方案**：在 `retrieve`、`retrieveByType`、`retrieveSimilarQuestionByTag` 三个方法入口处，用 `query + contentTypes + topK` 拼接缓存 Key，先查 Redis，命中则直接返回；未命中时正常走 Embedding + Milvus，结果写入 Redis（TTL = 1小时）。利用现有 `StringRedisTemplate`，**零新增依赖**。
+>
+> **适用范围**：`OJKnowledgeRetriever` 的所有公开检索方法；`OJChatAgent` 的 `@UserMessage` 路径由 LangChain4j 框架负责，不在此处缓存（多轮上下文每次均不同）。
+
+**核心实现（在 `OJKnowledgeRetriever` 中新增缓存层）**：
+```java
+@Component
+@Slf4j
+public class OJKnowledgeRetriever {
+
+    @Autowired
+    private MilvusEmbeddingStore embeddingStore;
+    @Autowired
+    private QwenEmbeddingModel embeddingModel;
+    @Autowired
+    private StringRedisTemplate redisTemplate;
+
+    /** 缓存前缀，与 ai:config: 命名空间隔离 */
+    private static final String RAG_CACHE_PREFIX = "ai:rag:cache:";
+    /** 缓存 TTL：1小时，知识库日常不变，同一题目多用户复用 */
+    private static final long RAG_CACHE_TTL_MINUTES = 60;
+
+    // ── 核心检索（带缓存） ───────────────────────────────────────
+    public String retrieve(String query, int topK, double minScore) {
+        String cacheKey = RAG_CACHE_PREFIX + DigestUtils.md5DigestAsHex(
+                (query + "|" + topK + "|" + minScore).getBytes(StandardCharsets.UTF_8));
+        String cached = redisTemplate.opsForValue().get(cacheKey);
+        if (cached != null) {
+            log.debug("[RAG Cache] HIT key={}", cacheKey);
+            return cached;
+        }
+        String result = doRetrieve(query, topK, minScore);
+        redisTemplate.opsForValue().set(cacheKey, result, TimeUtil.minutes(RAG_CACHE_TTL_MINUTES));
+        return result;
+    }
+
+    private String doRetrieve(String query, int topK, double minScore) {
+        Embedding queryEmbedding = embeddingModel.embed(query).content();
+        List<EmbeddingMatch<TextSegment>> matches = embeddingStore.search(
+                EmbeddingSearchRequest.builder()
+                        .queryEmbedding(queryEmbedding)
+                        .maxResults(topK)
+                        .minScore(minScore)
+                        .build()).matches();
+        String context = matches.stream()
+                .filter(match -> match.embedded() != null)
+                .map(match -> match.embedded().text())
+                .collect(Collectors.joining("\n\n"));
+        return context.isBlank() ? "无相关知识点" : context;
+    }
+
+    // retrieveByType / retrieveSimilarQuestionByTag 同理：入口先查缓存，
+    // 原有检索逻辑抽为 doXxx() 私有方法，结果写缓存后返回，此处略。
+
+    /**
+     * 手动刷新 RAG 缓存（导入新知识库数据后调用）
+     * 可在 Admin 接口或知识库导入完成事件中触发
+     */
+    public void clearRagCache() {
+        Set<String> keys = redisTemplate.keys(RAG_CACHE_PREFIX + "*");
+        if (keys != null && !keys.isEmpty()) {
+            redisTemplate.delete(keys);
+            log.info("[RAG Cache] 已清除 {} 条 RAG 缓存", keys.size());
+        }
+    }
+}
+```
+
+**缓存 Key 设计说明**：
+
+| 字段 | 说明 |
+|------|------|
+| 前缀 `ai:rag:cache:` | 与其他 Redis Key 命名空间隔离，便于批量清除 |
+| MD5(query + topK + minScore) | 32位定长，避免长 query 撑大 Key；不同参数组合互不冲突 |
+| TTL 60分钟 | 知识库非实时写入，1小时内结果完全一致；导入新数据后手动调用 `clearRagCache()` |
+
+**节省成本估算（参考）**：同一道题目一天被查询 50次，Embedding API 调用从 50次降为 1次（首次命中后全部走缓存），对高频热门题目效果显著。
+
+---
+
+#### 5.1.2 AiConfigService — 配置读取服务（完整实现）
+
+> **开发注意**：`AiAgentFactory`、`AiGlobalSwitchAspect` 均依赖本类，**必须先于 5.1.3 实现**。Prompt 动态管理所需的 `getPrompt()` 方法与完整 `READABLE_KEYS` 已一并写入本节，无需在后续章节回头修改。
+
+**Entity：`AiConfig.java`**
+```java
+@Data
+@TableName("ai_config")
+public class AiConfig {
+    @TableId(type = IdType.AUTO)
+    private Long id;
+    private String configKey;
+    private String configValue;
+    private String description;
+    private Integer isEnable;
+    private Date createTime;
+    private Date updateTime;
+}
+```
+
+**Mapper：`AiConfigMapper.java`**
+```java
+@Mapper
+public interface AiConfigMapper extends BaseMapper<AiConfig> {
+
+    @Select("SELECT * FROM ai_config WHERE config_key = #{configKey} LIMIT 1")
+    AiConfig selectByConfigKey(@Param("configKey") String configKey);
+
+    @Update("UPDATE ai_config SET config_value = #{configValue}, updateTime = NOW() " +
+            "WHERE config_key = #{configKey}")
+    int updateValueByKey(@Param("configKey") String configKey,
+                         @Param("configValue") String configValue);
+}
+```
+
+**Service：`AiConfigService.java`**
+```java
+/**
+ * AI 配置服务
+ * 读取逻辑：优先走 Redis 缓存（TTL 5分钟），缓存未命中回落到 MySQL，
+ * 并将结果回写缓存，下次请求直接命中；修改配置时同步删除缓存，5分钟内全局生效。
+ */
+@Service
+@Slf4j
+public class AiConfigService {
+
+    @Autowired
+    private AiConfigMapper aiConfigMapper;
+
+    @Autowired
+    private StringRedisTemplate redisTemplate;
+
+    private static final String CACHE_PREFIX = "ai:config:";
+    /** 空值占位符，防止缓存穿透 */
+    private static final String NULL_PLACEHOLDER = "__NULL__";
+    private static final long CACHE_TTL_MINUTES = 5;
+
+    /**
+     * 获取配置值
+     * @param configKey 配置键（如 "ai.model.name"）
+     * @return 配置值；配置不存在或已禁用时返回 null
+     */
+    public String getConfigValue(String configKey) {
+        String cacheKey = CACHE_PREFIX + configKey;
+        String cached = redisTemplate.opsForValue().get(cacheKey);
+        if (cached != null) {
+            return NULL_PLACEHOLDER.equals(cached) ? null : cached;
+        }
+        // 缓存未命中 → 查数据库
+        AiConfig config = aiConfigMapper.selectByConfigKey(configKey);
+        if (config == null || config.getIsEnable() != 1) {
+            // 缓存空值，防止缓存穿透（TTL 较短）
+            redisTemplate.opsForValue().set(cacheKey, NULL_PLACEHOLDER,
+                    CACHE_TTL_MINUTES, TimeUnit.MINUTES);
+            log.warn("[AiConfig] 配置 {} 不存在或已禁用", configKey);
+            return null;
+        }
+        String value = config.getConfigValue();
+        redisTemplate.opsForValue().set(cacheKey, value, CACHE_TTL_MINUTES, TimeUnit.MINUTES);
+        return value;
+    }
+
+    /**
+     * 更新配置（同步删除 Redis 缓存，下次读取时自动回填）
+     */
+    public void updateConfig(String configKey, String configValue) {
+        aiConfigMapper.updateValueByKey(configKey, configValue);
+        redisTemplate.delete(CACHE_PREFIX + configKey);
+        log.info("[AiConfig] 配置 {} 已更新并刷新缓存", configKey);
+    }
+
+    /**
+     * 检查 AI 功能全局开关
+     * @return true = 开启，false = 关闭（含配置不存在情况）
+     */
+    public boolean isAiEnabled() {
+        String value = getConfigValue("ai.global.enable");
+        return "true".equalsIgnoreCase(value);
+    }
+
+    /**
+     * 获取 Prompt 模板（含降级兜底）
+     * 供 5.2/5.4/5.5 各模块 Service 层调用，避免 Prompt 硬编码在 Java 代码中。
+     * 管理员在后台修改 ai_config 对应行后，5分钟内全局生效，无需重启。
+     *
+     * @param promptKey    配置键，如 "ai.prompt.code_analysis"
+     * @param defaultValue 降级默认值（配置不存在或 is_enable=0 时使用）
+     * @return Prompt 字符串
+     */
+    public String getPrompt(String promptKey, String defaultValue) {
+        String value = getConfigValue(promptKey);
+        if (value == null || value.isBlank()) {
+            log.warn("[AiConfig] Prompt {} 未配置，使用默认值", promptKey);
+            return defaultValue;
+        }
+        return value;
+    }
+}
+```
+
+**Admin 配置管理 Controller：`AiConfigController.java`**
+```java
+@RestController
+@RequestMapping("/admin/ai")
+@Slf4j
+public class AiConfigController {
+
+    @Autowired
+    private AiConfigService aiConfigService;
+
+    /**
+     * 可读写的配置 Key 白名单（含模型参数、RAG 参数、各模块 Prompt）
+     * api_key 不在此列，统一走环境变量注入
+     */
+    private static final List<String> READABLE_KEYS = Arrays.asList(
+            "ai.global.enable",
+            "ai.model.name", "ai.model.base_url", "ai.model.embedding_name",
+            "ai.rag.top_k", "ai.rag.similarity_threshold",
+            // Prompt 动态管理配置项（对应 5.2 代码分析 / 5.4 题目解析 / 5.5 错题分析）
+            "ai.prompt.code_analysis", "ai.prompt.wrong_analysis", "ai.prompt.question_parse"
+    );
+
+    /** 获取所有可读 AI 配置（过滤敏感项） */
+    @GetMapping("/config")
+    @AuthCheck(mustRole = "admin")
+    public BaseResponse<Map<String, String>> getConfig() {
+        Map<String, String> result = new LinkedHashMap<>();
+        for (String key : READABLE_KEYS) {
+            result.put(key, aiConfigService.getConfigValue(key));
+        }
+        return ResultUtils.success(result);
+    }
+
+    /** 修改 AI 配置（禁止修改 api_key，统一走环境变量） */
+    @PostMapping("/config")
+    @AuthCheck(mustRole = "admin")
+    public BaseResponse<String> updateConfig(@RequestBody AiConfigUpdateRequest request) {
+        if ("ai.model.api_key".equals(request.getConfigKey())) {
+            throw new BusinessException(ErrorCode.NO_AUTH_ERROR,
+                    "API Key 不允许通过接口修改，请使用环境变量 AI_API_KEY");
+        }
+        aiConfigService.updateConfig(request.getConfigKey(), request.getConfigValue());
+        return ResultUtils.success("配置更新成功，5分钟内全局生效");
+    }
+}
+```
+
+**初始化 SQL（在 `ai.sql` 中补充以下 INSERT）**：
+```sql
+-- Prompt 动态管理：各模块 Prompt 模板，可由管理员在后台调整，无需重启
+INSERT INTO ai_config (config_key, config_value, description, is_enable) VALUES
+('ai.prompt.code_analysis',
+ '你是一位资深 Java/算法教学助手，请对以下代码进行多维度分析：\n1. 代码风格与规范评分（10分制）；\n2. 逻辑正确性与边界情况；\n3. 时间/空间复杂度分析；\n4. 针对错误给出改进建议，不直接给出完整答案。\n回答语言：中文，格式清晰。',
+ '代码智能分析模块 Prompt 前置引导语', 1),
+
+('ai.prompt.wrong_analysis',
+ '你是一位编程学习辅导专家，基于以下错题信息，请：\n1. 指出错误根本原因（逻辑错误/边界遗漏/算法选择不当）；\n2. 给出分步骤改正思路，不直接提供完整正确代码；\n3. 总结该类题目的通用解题规律。\n回答语言：中文，适合初学者理解。',
+ '错题本分析模块 Prompt 前置引导语', 1),
+
+('ai.prompt.question_parse',
+ '你是XI OJ平台的题目解析助手，请对以下题目进行结构化分析：\n1. 考点分析：涉及哪些算法与数据结构；\n2. 分步骤解题思路，引导用户独立思考；\n3. 常见易错点与边界情况。\n回答格式结构清晰，语言通俗，适配编程初学者。',
+ '题目解析模块 Prompt 前置引导语', 1);
+```
+
+> **Service 层调用示例**（以代码分析模块为代表，5.2/5.5 同理）：
+> ```java
+> // AiCodeAnalysisServiceImpl.java
+> String systemPrompt = aiConfigService.getPrompt(
+>         "ai.prompt.code_analysis",
+>         "你是一位资深 Java/算法教学助手，请对以下代码进行多维度分析，回答语言：中文。");
+> String fullPrompt = systemPrompt + "\n\n" + buildContextPrompt(question, userCode, judgeResult, ragContext);
+> ```
+> `is_enable=0` 可快速回退到代码默认值，无需修改数据库数据。
+
+---
+
+#### 5.1.3 Agent执行模块
 **核心职责**：负责AI的思考决策、工具调用、结果整合，实现代码分析、问答、判题、错题分析等核心AI功能。
 **核心流程**：
 ```mermaid
@@ -732,6 +1067,8 @@ public interface OJChatAgent {
             3. 解题讲解需分步骤，适配新手学习节奏，结合RAG提供的知识点进行说明；
             4. 如需查询题目信息、评测代码、查询错题，调用对应工具完成；
             5. 回答语言为中文，格式清晰，重点突出。
+            【思考规范 - ReAct模式】：收到问题后，先明确：我需要哪些信息？是否需要调用工具？
+            若需调用工具，等工具返回结果后再基于结果决策下一步，不要在工具返回前跳到结论。
             """)
     String chat(
             @MemoryId String chatId,
@@ -746,6 +1083,8 @@ public interface OJChatAgent {
             3. 解题讲解需分步骤，适配新手学习节奏，结合RAG提供的知识点进行说明；
             4. 如需查询题目信息、评测代码、查询错题，调用对应工具完成；
             5. 回答语言为中文，格式清晰，重点突出。
+            【思考规范 - ReAct模式】：收到问题后，先明确：我需要哪些信息？是否需要调用工具？
+            若需调用工具，等工具返回结果后再基于结果决策下一步，不要在工具返回前跳到结论。
             """)
     Flux<String> chatStream(
             @MemoryId String chatId,
@@ -959,6 +1298,7 @@ public class AiAgentFactory {
 //   };
 // ─────────────────────────────────────────────
 @RestController
+@RequestMapping("/ai")
 public class AiChatController {
 
     @Autowired
@@ -970,7 +1310,7 @@ public class AiChatController {
      * 非流式接口：完整回答一次性返回
      */
     @RateLimit(types = {AI_USER_MINUTE, AI_IP_MINUTE, AI_CHAT_USER_DAY})
-    @PostMapping("/api/ai/chat")
+    @PostMapping("/chat")
     public BaseResponse<String> chat(@RequestBody AiChatRequest request, HttpServletRequest httpRequest) {
         String result = ojChatAgent.chat(request.getChatId(), request.getMessage());
         return ResultUtils.success(result);
@@ -981,7 +1321,7 @@ public class AiChatController {
      * 前端通过 EventSource 接收，解析 JSON 拼接完整文本
      */
     @RateLimit(types = {AI_USER_MINUTE, AI_IP_MINUTE, AI_CHAT_USER_DAY})
-    @GetMapping(value = "/api/ai/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @GetMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<String>> chatStream(@RequestParam String chatId,
                                                     @RequestParam String message,
                                                     HttpServletRequest httpRequest) {
@@ -1008,6 +1348,7 @@ public class AiChatController {
 
 /**
  * Agent可调用的OJ工具类
+ * LangChain4j 1.0.0-beta3 口径：`@Tool` 仅支持 `name` 与 `value`，不支持 `description`
  */
 @Component
 public class OJTools {
@@ -1015,13 +1356,13 @@ public class OJTools {
     @Autowired
     private QuestionService questionService;
     @Autowired
-    private JudgeService judgeService;
+    private AiJudgeService aiJudgeService;
     @Autowired
     private WrongQuestionService wrongQuestionService;
 
     @Tool(
             name = "query_question_info",
-            description = "查询OJ题目的详细信息，入参为题目ID或题目关键词，返回题干、考点、难度、标准答案"
+            value = "查询OJ题目的详细信息，入参为题目ID或题目关键词，返回题干、考点、难度、标准答案"
     )
     public String queryQuestionInfo(String keyword) {
         QuestionVO question = questionService.getByKeyword(keyword);
@@ -1047,14 +1388,18 @@ public class OJTools {
 
     @Tool(
             name = "judge_user_code",
-            description = "评测用户提交的代码，入参格式：题目ID|代码内容|代码语言，返回判题结果、错误信息"
+            value = "评测用户提交的代码，返回判题结果与错误信息。" +
+                    "参数说明：questionId=题目ID（Long）；code=代码内容（String）；" +
+                    "language=代码语言，如 java/python/cpp（String）；" +
+                    "userId=当前登录用户ID（Long，从会话上下文获取）"
     )
-    public String judgeUserCode(String param) {
-        String[] parts = param.split("\\|", 3);
-        if (parts.length != 3) {
-            return "参数格式错误，正确格式：题目ID|代码内容|代码语言";
-        }
-        JudgeResultDTO result = judgeService.submitCode(Long.parseLong(parts[0]), parts[1], parts[2]);
+    public String judgeUserCode(
+            @P("题目ID，Long类型") Long questionId,
+            @P("用户代码内容，完整字符串") String code,
+            @P("代码语言，如 java / python / cpp") String language,
+            @P("当前登录用户ID，Long类型") Long userId
+    ) {
+        JudgeResultDTO result = aiJudgeService.submitCode(questionId, code, language, userId);
         return String.format("""
                 判题结果：%s
                 执行用时：%sms
@@ -1070,17 +1415,13 @@ public class OJTools {
 
     @Tool(
             name = "query_user_wrong_question",
-            description = "查询用户的错题信息，入参为用户ID和题目ID，返回错误代码、判题结果、历史分析"
+            value = "查询用户的错题信息，返回错误代码、判题结果、历史分析。参数说明：userId=用户ID（Long）；questionId=题目ID（Long）"
     )
-    public String queryUserWrongQuestion(String param) {
-        String[] parts = param.split("\\|", 2);
-        if (parts.length != 2) {
-            return "参数格式错误，正确格式：用户ID|题目ID";
-        }
-        WrongQuestionVO wrongQuestion = wrongQuestionService.getByUserAndQuestion(
-                Long.parseLong(parts[0]),
-                Long.parseLong(parts[1])
-        );
+    public String queryUserWrongQuestion(
+            @P("用户ID，Long类型") Long userId,
+            @P("题目ID，Long类型") Long questionId
+    ) {
+        WrongQuestionVO wrongQuestion = wrongQuestionService.getByUserAndQuestion(userId, questionId);
         if (wrongQuestion == null) {
             return "未找到对应错题记录";
         }
@@ -1099,147 +1440,528 @@ public class OJTools {
 }
 ```
 
-#### 5.1.3 AiConfigService — 配置读取服务（完整实现）
+#### 5.1.3.1 OJTools 依赖类完整实现
 
-> **开发注意**：`AiAgentFactory`、`AiGlobalSwitchAspect` 均依赖本类，必须先实现它。
+> **说明**：`OJTools` 引用了多个在项目中尚未落地的类/方法，导致该类无法编译。本节按依赖顺序逐一给出完整实现。实现顺序：`JudgeResultDTO` → `AiJudgeService 接口` → `AiJudgeServiceImpl（含 source 隔离）` → `AiWrongQuestion 实体` → `AiWrongQuestionMapper` → `WrongQuestionVO` → `WrongQuestionService` → `QuestionSubmit.source 字段` → `QuestionVO 字段补充` → `QuestionService.getByKeyword()` → `OJTools.judgeUserCode() 签名更新说明`。
 
-**Entity：`AiConfig.java`**
+---
+
+**① JudgeResultDTO**
+新建文件：`src/main/java/com/XI/xi_oj/model/dto/judge/JudgeResultDTO.java`
 ```java
-@Data
-@TableName("ai_config")
-public class AiConfig {
-    @TableId(type = IdType.AUTO)
-    private Long id;
-    private String configKey;
-    private String configValue;
-    private String description;
-    private Integer isEnable;
-    private Date createTime;
-    private Date updateTime;
-}
-```
+package com.XI.xi_oj.model.dto.judge;
 
-**Mapper：`AiConfigMapper.java`**
-```java
-@Mapper
-public interface AiConfigMapper extends BaseMapper<AiConfig> {
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
 
-    @Select("SELECT * FROM ai_config WHERE config_key = #{configKey} LIMIT 1")
-    AiConfig selectByConfigKey(@Param("configKey") String configKey);
-
-    @Update("UPDATE ai_config SET config_value = #{configValue}, updateTime = NOW() " +
-            "WHERE config_key = #{configKey}")
-    int updateValueByKey(@Param("configKey") String configKey,
-                         @Param("configValue") String configValue);
-}
-```
-
-**Service：`AiConfigService.java`**
-```java
 /**
- * AI 配置服务
- * 读取逻辑：优先走 Redis 缓存（TTL 5分钟），缓存未命中回落到 MySQL，
- * 并将结果回写缓存，下次请求直接命中；修改配置时同步删除缓存，5分钟内全局生效。
+ * 判题结果 DTO
+ * 由 JudgeService.submitCode() 构建并返回给 OJTools.judgeUserCode()
+ * 字段命名与 OJTools 调用点（getStatus/getTimeUsed/getMemoryUsed/getErrorMsg）严格对齐
+ */
+@Data
+@Builder
+@NoArgsConstructor
+@AllArgsConstructor
+public class JudgeResultDTO {
+
+    /**
+     * 判题状态（Accepted / Wrong Answer / Time Limit Exceeded / Runtime Error 等）
+     * 来源：JudgeInfo.message
+     */
+    private String status;
+
+    /**
+     * 执行用时（ms）
+     * 来源：JudgeInfo.time
+     */
+    private Long timeUsed;
+
+    /**
+     * 内存占用（KB）
+     * 来源：JudgeInfo.memory
+     */
+    private Long memoryUsed;
+
+    /**
+     * 详细错误信息（非 AC 时与 status 相同；AC 时为 null）
+     */
+    private String errorMsg;
+}
+```
+
+---
+
+**② AiJudgeService 接口**
+新建文件：`src/main/java/com/XI/xi_oj/ai/judge/AiJudgeService.java`
+```java
+package com.XI.xi_oj.ai.judge;
+
+import com.XI.xi_oj.model.dto.judge.JudgeResultDTO;
+
+/**
+ * AI 判题服务接口
+ * 职责：为 Agent Tool（OJTools）提供同步判题能力，与原 JudgeService 异步链路完全解耦。
+ *
+ * 单体阶段：实现类直接调用 JudgeService.doJudge()
+ * 微服务阶段：只需将实现类中的 JudgeService 替换为 Feign Client，其他代码不动。
+ */
+public interface AiJudgeService {
+
+    /**
+     * AI工具调用入口：同步提交代码并等待判题结果
+     *
+     * @param questionId 题目ID
+     * @param code       用户代码
+     * @param language   代码语言（java / python / cpp）
+     * @param userId     提交用户ID（由 OJTools 从会话上下文传入）
+     * @return 判题结果 DTO
+     */
+    JudgeResultDTO submitCode(Long questionId, String code, String language, Long userId);
+}
+```
+
+> **注意**：`OJTools` 注入 `AiJudgeService` 而非原 `JudgeService`，`JudgeService` 接口本身**不需要修改**。
+
+---
+
+**③ AiJudgeServiceImpl——实现 `submitCode()`**
+新建文件：`src/main/java/com/XI/xi_oj/ai/judge/AiJudgeServiceImpl.java`
+```java
+package com.XI.xi_oj.ai.judge;
+
+import cn.hutool.json.JSONUtil;
+import com.XI.xi_oj.common.ErrorCode;
+import com.XI.xi_oj.exception.BusinessException;
+import com.XI.xi_oj.judge.JudgeService;
+import com.XI.xi_oj.judge.codesandbox.model.JudgeInfo;
+import com.XI.xi_oj.model.dto.judge.JudgeResultDTO;
+import com.XI.xi_oj.model.entity.Question;
+import com.XI.xi_oj.model.entity.QuestionSubmit;
+import com.XI.xi_oj.model.enums.QuestionSubmitStatusEnum;
+import com.XI.xi_oj.service.QuestionService;
+import com.XI.xi_oj.service.QuestionSubmitService;
+import jakarta.annotation.Resource;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+
+/**
+ * AI 判题服务实现
+ *
+ * 单体阶段：直接调用 JudgeService.doJudge()（同进程，无 RPC 开销）
+ * 微服务阶段：将 JudgeService 替换为 judge-service 的 Feign Client 即可，其余逻辑不变。
  */
 @Service
 @Slf4j
-public class AiConfigService {
+public class AiJudgeServiceImpl implements AiJudgeService {
 
-    @Autowired
-    private AiConfigMapper aiConfigMapper;
+    @Resource
+    private JudgeService judgeService;             // 单体阶段：直接注入；微服务阶段：换成 Feign Client
 
-    @Autowired
-    private StringRedisTemplate redisTemplate;
+    @Resource
+    private QuestionService questionService;
 
-    private static final String CACHE_PREFIX = "ai:config:";
-    /** 空值占位符，防止缓存穿透 */
-    private static final String NULL_PLACEHOLDER = "__NULL__";
-    private static final long CACHE_TTL_MINUTES = 5;
+    @Resource
+    private QuestionSubmitService questionSubmitService;
+
+    @Override
+    public JudgeResultDTO submitCode(Long questionId, String code, String language, Long userId) {
+        // 1. 校验题目是否存在
+        Question question = questionService.getById(questionId);
+        if (question == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "题目不存在");
+        }
+
+        // 2. 构建提交记录（绕过异步路径，确保可同步拿到 id）
+        // ⚠️ 必须设置 source="ai_tool"，将 AI 工具调用的判题记录与用户正常提交隔离：
+        //    - 用户做题统计（solved_num / submit_num）查询时 WHERE source IS NULL 过滤此类记录
+        //    - 题目通过数（question.acceptedNum）更新时同样跳过 ai_tool 记录
+        //    - 防止 AI 问答多轮对话中多次测试代码污染用户提交历史
+        QuestionSubmit questionSubmit = new QuestionSubmit();
+        questionSubmit.setUserId(userId);
+        questionSubmit.setQuestionId(questionId);
+        questionSubmit.setCode(code);
+        questionSubmit.setLanguage(language);
+        questionSubmit.setStatus(QuestionSubmitStatusEnum.WAITING.getValue());
+        questionSubmit.setJudgeInfo("{}");
+        questionSubmit.setSource("ai_tool");   // ← 关键：标记为 AI 工具调用，排除在用户统计之外
+        boolean saved = questionSubmitService.save(questionSubmit);
+        if (!saved) {
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "提交记录创建失败");
+        }
+
+        // 3. 同步调用 doJudge（AI 工具调用必须拿到结果，不走 CompletableFuture.runAsync）
+        QuestionSubmit judged;
+        try {
+            judged = judgeService.doJudge(questionSubmit.getId());
+        } catch (Exception e) {
+            log.error("[AiJudge] 判题异常 questionId={}: {}", questionId, e.getMessage());
+            return JudgeResultDTO.builder()
+                    .status("判题失败")
+                    .errorMsg(e.getMessage())
+                    .build();
+        }
+
+        // 4. 反序列化 JudgeInfo JSON → JudgeResultDTO
+        JudgeInfo judgeInfo = JSONUtil.toBean(judged.getJudgeInfo(), JudgeInfo.class);
+        String status;
+        if (judgeInfo.getMessage() != null && !judgeInfo.getMessage().isBlank()) {
+            status = judgeInfo.getMessage();
+        } else {
+            status = QuestionSubmitStatusEnum.SUCCEED.getValue().equals(judged.getStatus())
+                    ? "Accepted" : "Failed";
+        }
+
+        return JudgeResultDTO.builder()
+                .status(status)
+                .timeUsed(judgeInfo.getTime())
+                .memoryUsed(judgeInfo.getMemory())
+                .errorMsg("Accepted".equalsIgnoreCase(status) ? null : status)
+                .build();
+    }
+}
+```
+
+> **设计说明**：
+> - `AiJudgeService` 放在 `ai/judge` 包下，与 `judge` 包的原有逻辑**物理隔离**，拆微服务时整个包迁移到 `ai-service` 即可。
+> - `JudgeService` 接口无需添加任何方法，判题核心逻辑保持不变。
+> - 微服务阶段只需将 `AiJudgeServiceImpl` 中的 `JudgeService judgeService` 替换为 Feign Client，`OJTools` 和接口层代码**零改动**。
+> - **source 字段隔离**：AI 工具调用的判题记录统一打上 `source='ai_tool'` 标记。`question_submit` 表需新增此列（见下方 SQL），`QuestionSubmit` 实体需添加对应字段；统计查询（solved_num / submit_num / acceptedNum）均需加 `WHERE source IS NULL OR source != 'ai_tool'` 过滤，避免 AI 测试行为污染用户真实统计数据。
+
+---
+
+**④ AiWrongQuestion 实体**
+新建文件：`src/main/java/com/XI/xi_oj/model/entity/AiWrongQuestion.java`
+```java
+package com.XI.xi_oj.model.entity;
+
+import com.baomidou.mybatisplus.annotation.*;
+import lombok.Data;
+
+import java.io.Serializable;
+import java.util.Date;
+
+/**
+ * AI 错题本
+ * 对应数据库表：ai_wrong_question
+ * 注意：项目配置 map-underscore-to-camel-case: false，
+ * 因此下划线列名必须使用 @TableField 显式映射
+ */
+@TableName(value = "ai_wrong_question")
+@Data
+public class AiWrongQuestion implements Serializable {
+
+    @TableId(type = IdType.AUTO)
+    private Long id;
+
+    @TableField("user_id")
+    private Long userId;
+
+    @TableField("question_id")
+    private Long questionId;
+
+    /** 用户提交的错误代码 */
+    @TableField("wrong_code")
+    private String wrongCode;
+
+    /** 错误判题结果（非 Accepted 的状态文本，如 Wrong Answer） */
+    @TableField("wrong_judge_result")
+    private String wrongJudgeResult;
+
+    /** AI 生成的错误原因分析 */
+    @TableField("wrong_analysis")
+    private String wrongAnalysis;
+
+    /** AI 生成的复习计划 */
+    @TableField("review_plan")
+    private String reviewPlan;
+
+    /** AI 推荐的同类题目 ID（JSON 数组，如 [12, 34, 56]） */
+    @TableField("similar_questions")
+    private String similarQuestions;
+
+    /** 是否已复习（0-否 1-是） */
+    @TableField("is_reviewed")
+    private Integer isReviewed;
+
+    /** 复习次数 */
+    @TableField("review_count")
+    private Integer reviewCount;
+
+    /** 下次复习时间（艾宾浩斯遗忘曲线调度） */
+    @TableField("next_review_time")
+    private Date nextReviewTime;
+
+    private Date createTime;
+
+    private Date updateTime;
+
+    @TableField(exist = false)
+    private static final long serialVersionUID = 1L;
+}
+```
+
+---
+
+**⑤ AiWrongQuestionMapper**
+新建文件：`src/main/java/com/XI/xi_oj/mapper/AiWrongQuestionMapper.java`
+```java
+package com.XI.xi_oj.mapper;
+
+import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.XI.xi_oj.model.entity.AiWrongQuestion;
+import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Select;
+
+@Mapper
+public interface AiWrongQuestionMapper extends BaseMapper<AiWrongQuestion> {
 
     /**
-     * 获取配置值
-     * @param configKey 配置键（如 "ai.model.name"）
-     * @return 配置值；配置不存在或已禁用时返回 null
+     * 按用户ID + 题目ID 精确查询最近一条错题记录
      */
-    public String getConfigValue(String configKey) {
-        String cacheKey = CACHE_PREFIX + configKey;
-        String cached = redisTemplate.opsForValue().get(cacheKey);
-        if (cached != null) {
-            return NULL_PLACEHOLDER.equals(cached) ? null : cached;
-        }
-        // 缓存未命中 → 查数据库
-        AiConfig config = aiConfigMapper.selectByConfigKey(configKey);
-        if (config == null || config.getIsEnable() != 1) {
-            // 缓存空值，防止缓存穿透（TTL 较短）
-            redisTemplate.opsForValue().set(cacheKey, NULL_PLACEHOLDER,
-                    CACHE_TTL_MINUTES, TimeUnit.MINUTES);
-            log.warn("[AiConfig] 配置 {} 不存在或已禁用", configKey);
+    @Select("SELECT * FROM ai_wrong_question WHERE user_id = #{userId} " +
+            "AND question_id = #{questionId} ORDER BY create_time DESC LIMIT 1")
+    AiWrongQuestion selectByUserAndQuestion(@Param("userId") Long userId,
+                                            @Param("questionId") Long questionId);
+}
+```
+
+---
+
+**⑥ WrongQuestionVO**
+新建文件：`src/main/java/com/XI/xi_oj/model/vo/WrongQuestionVO.java`
+```java
+package com.XI.xi_oj.model.vo;
+
+import com.XI.xi_oj.model.entity.AiWrongQuestion;
+import lombok.Data;
+import org.springframework.beans.BeanUtils;
+
+import java.io.Serializable;
+
+/**
+ * 错题封装类（只读 VO，供 OJTools 和 Controller 层返回）
+ * 字段名与 OJTools.queryUserWrongQuestion() 调用点严格对齐：
+ *   getWrongCode() / getWrongJudgeResult() / getWrongAnalysis() / getReviewCount()
+ */
+@Data
+public class WrongQuestionVO implements Serializable {
+
+    private Long id;
+
+    private Long userId;
+
+    private Long questionId;
+
+    /** 错误代码 */
+    private String wrongCode;
+
+    /** 错误判题结果 */
+    private String wrongJudgeResult;
+
+    /** AI 错误分析 */
+    private String wrongAnalysis;
+
+    /** 复习次数 */
+    private Integer reviewCount;
+
+    /** 是否已复习 */
+    private Integer isReviewed;
+
+    /**
+     * 实体转 VO
+     */
+    public static WrongQuestionVO objToVo(AiWrongQuestion wrongQuestion) {
+        if (wrongQuestion == null) {
             return null;
         }
-        String value = config.getConfigValue();
-        redisTemplate.opsForValue().set(cacheKey, value, CACHE_TTL_MINUTES, TimeUnit.MINUTES);
-        return value;
+        WrongQuestionVO vo = new WrongQuestionVO();
+        BeanUtils.copyProperties(wrongQuestion, vo);
+        return vo;
     }
 
-    /**
-     * 更新配置（同步删除 Redis 缓存，下次读取时自动回填）
-     */
-    public void updateConfig(String configKey, String configValue) {
-        aiConfigMapper.updateValueByKey(configKey, configValue);
-        redisTemplate.delete(CACHE_PREFIX + configKey);
-        log.info("[AiConfig] 配置 {} 已更新并刷新缓存", configKey);
-    }
-
-    /**
-     * 检查 AI 功能全局开关
-     * @return true = 开启，false = 关闭（含配置不存在情况）
-     */
-    public boolean isAiEnabled() {
-        String value = getConfigValue("ai.global.enable");
-        return "true".equalsIgnoreCase(value);
-    }
+    private static final long serialVersionUID = 1L;
 }
 ```
 
-**Admin 配置管理 Controller：`AiConfigController.java`**
+---
+
+**⑦ WrongQuestionService 接口 + 实现类**
+新建文件：`src/main/java/com/XI/xi_oj/service/WrongQuestionService.java`
 ```java
-@RestController
-@RequestMapping("/api/admin/ai")
-@Slf4j
-public class AiConfigController {
+package com.XI.xi_oj.service;
 
-    @Autowired
-    private AiConfigService aiConfigService;
+import com.baomidou.mybatisplus.extension.service.IService;
+import com.XI.xi_oj.model.entity.AiWrongQuestion;
+import com.XI.xi_oj.model.vo.WrongQuestionVO;
 
-    private static final List<String> READABLE_KEYS = Arrays.asList(
-            "ai.global.enable", "ai.model.name", "ai.model.base_url",
-            "ai.model.embedding_name", "ai.rag.top_k", "ai.rag.similarity_threshold"
-    );
+/**
+ * 针对表【ai_wrong_question(AI错题本)】的数据库操作 Service
+ * 供 OJTools 与错题收集器注入
+ */
+public interface WrongQuestionService extends IService<AiWrongQuestion> {
 
-    /** 获取所有可读 AI 配置（过滤敏感项） */
-    @GetMapping("/config")
-    @AuthCheck(mustRole = "admin")
-    public BaseResponse<Map<String, String>> getConfig() {
-        Map<String, String> result = new LinkedHashMap<>();
-        for (String key : READABLE_KEYS) {
-            result.put(key, aiConfigService.getConfigValue(key));
-        }
-        return ResultUtils.success(result);
-    }
+    /**
+     * 查询指定用户的指定题目错题记录，并封装为 VO
+     *
+     * @param userId     用户ID
+     * @param questionId 题目ID
+     * @return 错题 VO；无记录时返回 null
+     */
+    WrongQuestionVO getByUserAndQuestion(Long userId, Long questionId);
+}
+```
 
-    /** 修改 AI 配置（禁止修改 api_key，统一走环境变量） */
-    @PostMapping("/config")
-    @AuthCheck(mustRole = "admin")
-    public BaseResponse<String> updateConfig(@RequestBody AiConfigUpdateRequest request) {
-        if ("ai.model.api_key".equals(request.getConfigKey())) {
-            throw new BusinessException(ErrorCode.NO_AUTH_ERROR,
-                    "API Key 不允许通过接口修改，请使用环境变量 AI_API_KEY");
-        }
-        aiConfigService.updateConfig(request.getConfigKey(), request.getConfigValue());
-        return ResultUtils.success("配置更新成功，5分钟内全局生效");
+新建文件：`src/main/java/com/XI/xi_oj/service/impl/WrongQuestionServiceImpl.java`
+```java
+package com.XI.xi_oj.service.impl;
+
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.XI.xi_oj.mapper.AiWrongQuestionMapper;
+import com.XI.xi_oj.model.entity.AiWrongQuestion;
+import com.XI.xi_oj.model.vo.WrongQuestionVO;
+import com.XI.xi_oj.service.WrongQuestionService;
+import jakarta.annotation.Resource;
+import org.springframework.stereotype.Service;
+
+@Service
+public class WrongQuestionServiceImpl
+        extends ServiceImpl<AiWrongQuestionMapper, AiWrongQuestion>
+        implements WrongQuestionService {
+
+    @Resource
+    private AiWrongQuestionMapper aiWrongQuestionMapper;
+
+    @Override
+    public WrongQuestionVO getByUserAndQuestion(Long userId, Long questionId) {
+        AiWrongQuestion wrongQuestion =
+                aiWrongQuestionMapper.selectByUserAndQuestion(userId, questionId);
+        return WrongQuestionVO.objToVo(wrongQuestion);
     }
 }
 ```
+
+---
+
+**⑧ QuestionSubmit 实体——补充 `source` 字段**
+修改文件：`src/main/java/com/XI/xi_oj/model/entity/QuestionSubmit.java`（在 `isDelete` 字段之前添加）
+```java
+/**
+ * 提交来源（null / "" = 用户正常提交；"ai_tool" = AI 工具调用的测试性提交）
+ * 用途：将 Agent judgeUserCode 工具调用产生的判题记录与用户正常提交隔离，
+ *       避免 AI 测试行为影响 solved_num / submit_num / question.acceptedNum 统计
+ * 对应 DDL：ALTER TABLE question_submit ADD COLUMN source varchar(32) DEFAULT NULL ...
+ */
+private String source;
+```
+
+> **注意**：`source` 字段在 MyBatis-Plus 查询中默认参与 INSERT/UPDATE。`AiJudgeServiceImpl` 已在构建提交记录时调用 `questionSubmit.setSource("ai_tool")`，无需其他地方手动设置。
+
+---
+
+**⑨ QuestionVO——补充 `answer` 和 `difficulty` 字段**
+修改文件：`src/main/java/com/XI/xi_oj/model/vo/QuestionVO.java`（在 `judgeConfig` 字段之后添加）
+```java
+/**
+ * 题目标准答案
+ * 来源：Question.answer（通过 BeanUtils.copyProperties 自动复制）
+ * 注意：返回给普通用户时 Controller 层可将此字段置 null
+ */
+private String answer;
+
+/**
+ * 题目难度（easy / medium / hard）
+ * 注意：当前 question 表无 difficulty 列，此字段默认为 null。
+ * 后续在 question 表新增 difficulty varchar(16) 列并在 Question 实体添加对应字段后自动生效。
+ */
+private String difficulty;
+```
+
+> **说明**：
+> - `answer` 字段：`Question` 实体已有 `answer` 字段，在 `QuestionVO` 中添加后，`objToVo()` 里的 `BeanUtils.copyProperties(question, questionVO)` 会自动完成赋值，无需修改 `objToVo()` 方法。
+> - `difficulty` 字段：当前 `question` 表无此列，`BeanUtils.copyProperties` 无法从 `Question` 实体赋值，字段始终为 `null`。`OJTools.queryQuestionInfo()` 的难度输出将显示 `null`，不影响其他功能。
+
+---
+
+**⑩ QuestionService 接口——补充 `getByKeyword()` + QuestionServiceImpl 实现**
+修改文件：`src/main/java/com/XI/xi_oj/service/QuestionService.java`（在接口末尾添加）
+```java
+/**
+ * 按关键词查询题目
+ * 优先按 ID 精确匹配（keyword 可解析为 Long 时），降级为标题模糊搜索
+ *
+ * @param keyword 题目ID（数字字符串）或标题关键词
+ * @return 匹配的 QuestionVO；未找到时返回 null
+ */
+QuestionVO getByKeyword(String keyword);
+```
+
+修改文件：`src/main/java/com/XI/xi_oj/service/impl/QuestionServiceImpl.java`（在类体末尾添加方法）
+```java
+@Override
+public QuestionVO getByKeyword(String keyword) {
+    if (keyword == null || keyword.isBlank()) {
+        return null;
+    }
+    // 1. 优先 ID 精确查找
+    try {
+        long id = Long.parseLong(keyword.trim());
+        Question question = this.getById(id);
+        if (question != null && question.getIsDelete() == 0) {
+            return QuestionVO.objToVo(question);
+        }
+    } catch (NumberFormatException ignored) {
+        // 非数字字符串，走标题模糊查找
+    }
+    // 2. 标题模糊查找，取第一条匹配
+    QueryWrapper<Question> wrapper = new QueryWrapper<>();
+    wrapper.like("title", keyword)
+           .eq("isDelete", 0)
+           .last("LIMIT 1");
+    Question question = this.getOne(wrapper);
+    return QuestionVO.objToVo(question);
+}
+```
+
+---
+
+**⑪ OJTools.judgeUserCode() 签名更新说明**
+
+`OJTools.judgeUserCode()` 原签名缺少 `userId` 参数，需增加第四个 `@P` 注解参数，并更新 `@Tool` 的 `value` 说明，同时将 `judgeService.submitCode()` 的调用也传入 `userId`：
+
+```java
+@Tool(
+        name = "judge_user_code",
+        value = "评测用户提交的代码，返回判题结果与错误信息。" +
+                "参数说明：questionId=题目ID（Long）；code=代码内容（String）；" +
+                "language=代码语言，如 java/python/cpp（String）；" +
+                "userId=当前登录用户ID（Long，从会话上下文获取）"
+)
+public String judgeUserCode(
+        @P("题目ID，Long类型") Long questionId,
+        @P("用户代码内容，完整字符串") String code,
+        @P("代码语言，如 java / python / cpp") String language,
+        @P("当前登录用户ID，Long类型") Long userId
+) {
+    JudgeResultDTO result = judgeService.submitCode(questionId, code, language, userId);
+    return String.format("""
+            判题结果：%s
+            执行用时：%sms
+            内存占用：%sMB
+            错误信息：%s
+            """,
+            result.getStatus(),
+            result.getTimeUsed(),
+            result.getMemoryUsed(),
+            result.getErrorMsg()
+    );
+}
+```
+
+> **System Message 中需补充提示**：在 `OJChatAgent` 的 `@SystemMessage` 中，可以在规则 4 后追加一条：「4.1. 调用 judge_user_code 工具时，需从当前对话上下文中获取 userId 并传入；若用户未提供，提示用户登录后再操作。」
 
 ---
 
@@ -1247,6 +1969,8 @@ public class AiConfigController {
 **功能描述**：对用户提交的代码进行多维度分析，包括代码评分、错误分析、改进建议、判题结果解读，对应截图中的「代码查看与智能分析」页面。
 
 **调用模式**：无状态单次调用，直接注入共享 `ChatModel`，RAG 检索由 Service 层手动执行后注入 Prompt。
+
+> **沙箱调用说明**：5.2 代码分析**不主动调用代码沙箱**。AI 分析的对象是"用户通过 OJ 正常提交流程已得到的判题结果"，沙箱在前序正常提交时已执行完毕。AI 只做分析师，不做裁判员。若用户想让 AI 在问答中测试代码，走 `OJTools.judgeUserCode` 工具（见 5.1.3），该工具才会触发沙箱并产生 `source='ai_tool'` 的隔离提交记录。
 
 **核心流程**：
 1. 用户提交代码后，先通过OJ原有代码沙箱完成判题，获取判题结果；
@@ -1467,7 +2191,7 @@ public interface AiChatRecordMapper extends BaseMapper<AiChatRecord> {
 private AiChatService aiChatService;
 
 /** 获取对话历史记录 */
-@GetMapping("/api/ai/chat/history")
+@GetMapping("/chat/history")
 public BaseResponse<List<AiChatRecord>> getChatHistory(@RequestParam String chatId,
                                                         HttpServletRequest httpRequest) {
     Long userId = UserHolder.getCurrentUserId(httpRequest);
@@ -1475,7 +2199,7 @@ public BaseResponse<List<AiChatRecord>> getChatHistory(@RequestParam String chat
 }
 
 /** 清空对话历史（含 Agent 记忆） */
-@PostMapping("/api/ai/chat/clear")
+@PostMapping("/chat/clear")
 public BaseResponse<String> clearHistory(@RequestBody AiChatClearRequest request,
                                           HttpServletRequest httpRequest) {
     Long userId = UserHolder.getCurrentUserId(httpRequest);
@@ -1554,6 +2278,8 @@ public class AiQuestionParseService {
 **功能描述**：自动收集用户错题，AI分析错误原因，生成针对性的复习计划与同类题目推荐，帮助用户查漏补缺，巩固知识点。
 
 **调用模式**：无状态单次调用，直接注入共享 `ChatModel`，RAG 检索由 Service 层手动执行后注入 Prompt（与 5.2 相同模式）。
+
+> **沙箱调用说明**：5.5 错题分析**不主动调用代码沙箱**。错题本收集的是"已经判题失败的记录"，沙箱在正常提交流程中已执行完毕，判题结果已落库。AI 只分析已有的错误结果，不重新执行代码。重新测试代码的需求走 Agent 的 `judgeUserCode` 工具（见 5.1.3）。
 
 **核心流程**：
 1. **错题自动收集**：用户提交代码判题失败（WA/TLE/RE等）后，系统自动将「题目ID、用户ID、错误代码、判题结果」存入`ai_wrong_question`表；
@@ -1894,6 +2620,7 @@ public class UserProfileService {
     /**
      * 同步做题统计数据（可由定时任务或判题结果回调触发）
      * 调用时机：每次判题完成后、或每日凌晨定时全量同步
+     * ⚠️ 统计时过滤 source='ai_tool' 记录：AI 工具调用的测试性提交不计入用户做题成绩
      */
     public void syncUserStats(Long userId) {
         int solvedNum = questionSubmitMapper.countAcceptedByUser(userId);
@@ -1916,10 +2643,36 @@ public interface UserProfileMapper extends BaseMapper<UserProfile> {
 }
 ```
 
+**`QuestionSubmitMapper.java`（补充统计方法，必须过滤 `source='ai_tool'`）**：
+
+> 以下两个方法是 `UserProfileService.syncUserStats()` 的依赖。`source IS NULL OR source != 'ai_tool'` 确保 AI 工具调用产生的测试性提交不计入用户做题成绩，也不计入题目通过数。
+
+```java
+// 追加到现有 QuestionSubmitMapper 接口中
+
+/**
+ * 统计用户 AC 题目数（去重）
+ * ⚠️ WHERE source IS NULL OR source != 'ai_tool'：排除 AI 工具调用的测试性提交
+ */
+@Select("SELECT COUNT(DISTINCT questionId) FROM question_submit " +
+        "WHERE userId = #{userId} AND status = 2 AND isDelete = 0 " +
+        "AND (source IS NULL OR source != 'ai_tool')")
+int countAcceptedByUser(@Param("userId") Long userId);
+
+/**
+ * 统计用户总提交数
+ * ⚠️ 同上，排除 ai_tool 来源的记录
+ */
+@Select("SELECT COUNT(*) FROM question_submit " +
+        "WHERE userId = #{userId} AND isDelete = 0 " +
+        "AND (source IS NULL OR source != 'ai_tool')")
+int countTotalByUser(@Param("userId") Long userId);
+```
+
 **`UserProfileController.java`**：
 ```java
 @RestController
-@RequestMapping("/api/user")
+@RequestMapping("/user")
 public class UserProfileController {
 
     @Autowired
@@ -2105,7 +2858,7 @@ public interface QuestionCommentMapper extends BaseMapper<QuestionComment> {
 **`QuestionCommentController.java`**：
 ```java
 @RestController
-@RequestMapping("/api/comment")
+@RequestMapping("/comment")
 public class QuestionCommentController {
 
     @Autowired
@@ -2144,6 +2897,8 @@ public class QuestionCommentController {
 
 ### 5.9 AI接口限流模块
 **功能描述**：在现有 `@RateLimit` + Redis 限流体系基础上，扩展 AI 专属限流维度，控制大模型 API 调用成本，防止接口滥用，无需改动现有提交限流逻辑，完全向后兼容。
+
+> **现状对齐（2026-04-16）**：当前代码中的 `RateLimitTypeEnum` 仅包含 `submit:*` 维度，以下 `AI_*` 枚举与拦截逻辑为待新增方案。
 
 **整合方式选型**：
 
@@ -2278,7 +3033,7 @@ INSERT INTO rate_limit_rule (rule_key, limit_count, window_seconds, is_enable, d
     types = {AI_USER_MINUTE, AI_IP_MINUTE, AI_CHAT_USER_DAY},
     message = "AI问答调用过于频繁，请稍后再试"
 )
-@PostMapping("/api/ai/chat")
+@PostMapping("/ai/chat")
 public BaseResponse<String> chat(@RequestBody AiChatRequest request, HttpServletRequest httpRequest) { ... }
 
 // 5.2 AI代码分析：分钟级 + IP级 + 每日（code专属）
@@ -2286,7 +3041,7 @@ public BaseResponse<String> chat(@RequestBody AiChatRequest request, HttpServlet
     types = {AI_USER_MINUTE, AI_IP_MINUTE, AI_CODE_USER_DAY},
     message = "AI代码分析调用过于频繁，请稍后再试"
 )
-@PostMapping("/api/ai/code/analysis")
+@PostMapping("/ai/code/analysis")
 public BaseResponse<String> analyzeCode(@RequestBody AiCodeAnalysisRequest request, HttpServletRequest httpRequest) { ... }
 
 // 5.4 AI题目解析：分钟级 + IP级 + 每日（question专属）
@@ -2294,7 +3049,7 @@ public BaseResponse<String> analyzeCode(@RequestBody AiCodeAnalysisRequest reque
     types = {AI_USER_MINUTE, AI_IP_MINUTE, AI_QUESTION_USER_DAY},
     message = "AI解析调用过于频繁，请稍后再试"
 )
-@GetMapping("/api/ai/question/parse")
+@GetMapping("/ai/question/parse")
 public BaseResponse<String> parseQuestion(@RequestParam Long questionId, HttpServletRequest httpRequest) { ... }
 
 // 5.5 AI错题分析：分钟级 + IP级 + 每日（wrong专属）
@@ -2302,7 +3057,7 @@ public BaseResponse<String> parseQuestion(@RequestParam Long questionId, HttpSer
     types = {AI_USER_MINUTE, AI_IP_MINUTE, AI_WRONG_USER_DAY},
     message = "AI错题分析调用过于频繁，请稍后再试"
 )
-@GetMapping("/api/ai/wrong-question/analysis")
+@GetMapping("/ai/wrong-question/analysis")
 public BaseResponse<String> analyzeWrongQuestion(@RequestParam Long wrongQuestionId, HttpServletRequest httpRequest) { ... }
 ```
 
@@ -2368,7 +3123,11 @@ public class KnowledgeInitializer implements CommandLineRunner {
     public void run(String... args) {
         // 检查向量库是否已有数据，有则跳过，避免重复导入
         Embedding probe = embeddingModel.embed("初始化检测").content();
-        List<EmbeddingMatch<TextSegment>> existing = embeddingStore.findRelevant(probe, 1);
+        List<EmbeddingMatch<TextSegment>> existing = embeddingStore.search(
+                EmbeddingSearchRequest.builder()
+                        .queryEmbedding(probe)
+                        .maxResults(1)
+                        .build()).matches();
         if (!existing.isEmpty()) {
             log.info("[知识库] 向量库已有数据，跳过初始化");
             return;
@@ -2439,14 +3198,15 @@ public class QuestionVectorSyncJob {
         int success = 0, fail = 0;
         for (Question q : questions) {
             try {
-                // 只存标题+题干+标签+难度，不存标准答案（防止 AI 直接泄题）
-                String text = String.format("题目标题：%s\n题干：%s\n考点标签：%s\n难度：%s",
-                        q.getTitle(), q.getContent(), q.getTags(), q.getDifficulty());
+                // 只存标题+题干+标签，不存标准答案（防止 AI 直接泄题）
+                // 注意：当前项目 Question.tags 为 JSON 字符串，且无 difficulty 字段
+                String tagText = q.getTags();
+                String text = String.format("题目标题：%s\n题干：%s\n考点标签：%s",
+                        q.getTitle(), q.getContent(), tagText);
                 Metadata metadata = Metadata.from(Map.of(
                         "question_id",  q.getId(),
                         "content_type", "题目",
-                        "tag",          String.join(",", q.getTags()),
-                        "difficulty",   q.getDifficulty()
+                        "tag",          tagText
                 ));
                 Embedding embedding = embeddingModel.embed(text).content();
                 embeddingStore.add(embedding, TextSegment.from(text, metadata));
@@ -2587,3 +3347,18 @@ flowchart LR
 | /api/ai/wrong-question/review | POST | application/json | 标记错题已复习 |
 | /api/admin/ai/config | POST | application/json | 修改AI系统配置 |
 | /api/admin/ai/config | GET | application/json | 获取AI系统配置 |
+
+## 十、施工级手册入口
+
+为支持技术人员在**不依赖 AI 辅助**的情况下手工完成落地，已提供施工级执行手册：
+
+- `MD/aigc_exec_steps.md`（V2.0，2026-04-16）
+
+使用方式：
+
+1. 先阅读本方案文档（明确架构与边界）；
+2. 再严格按 `MD/aigc_exec_steps.md` 的里程碑（M0-M7）顺序执行；
+3. 每个里程碑按 DoD 验收通过后再进入下一阶段。
+
+
+

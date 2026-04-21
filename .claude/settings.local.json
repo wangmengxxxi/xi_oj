@@ -9,7 +9,9 @@
       "WebFetch(domain:github.com)",
       "WebFetch(domain:mvnrepository.com)",
       "Bash(python3 -c ':*)",
-      "Bash(python3)"
+      "Bash(python3)",
+      "WebFetch(domain:docs.langchain4j.dev)",
+      "Bash(python -c ' *)"
     ]
   }
 }
