@@ -23,6 +23,20 @@ public interface AiChatRecordMapper extends BaseMapper<AiChatRecord> {
     List<AiChatRecord> selectLatestByChatId(@Param("chatId") String chatId,
                                             @Param("rounds") Integer rounds);
 
+    @Select("SELECT * FROM ai_chat_record " +
+            "WHERE user_id = #{userId} AND chat_id = #{chatId} " +
+            "ORDER BY createTime DESC, id DESC " +
+            "LIMIT #{rounds}")
+    List<AiChatRecord> selectLatestByUserAndChat(@Param("userId") Long userId,
+                                                 @Param("chatId") String chatId,
+                                                 @Param("rounds") Integer rounds);
+
+    @Select("SELECT * FROM ai_chat_record " +
+            "WHERE user_id = #{userId} AND chat_id = #{chatId} " +
+            "ORDER BY createTime ASC, id ASC")
+    List<AiChatRecord> selectByUserAndChat(@Param("userId") Long userId,
+                                           @Param("chatId") String chatId);
+
     /**
      * 历史记录游标分页（避免 LIMIT + OFFSET 重复/漏读）
      */

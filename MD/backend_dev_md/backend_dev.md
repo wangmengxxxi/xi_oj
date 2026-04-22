@@ -89,7 +89,7 @@ flowchart LR
 ### 3.3 项目核心依赖（pom.xml）
 > **与当前仓库对齐说明（2026-04-16）**
 > - 已引入：`langchain4j`、`langchain4j-community-dashscope`、`langchain4j-milvus`；
-> - 尚未引入（按需在 AI 流式阶段补充）：`spring-boot-starter-webflux`、`langchain4j-reactor`、`caffeine`。
+> - 尚未引入（按需在 AI 流式阶段补充）：`spring-boot-starter-webflux`、`langchain4j-reactor`。
 
 ```xml
 <!-- BOM放在 dependencyManagement 中统一管理版本，避免版本冲突 -->
@@ -169,12 +169,6 @@ flowchart LR
         <artifactId>spring-boot-starter-webflux</artifactId>
     </dependency>
 
-    <!-- Caffeine 本地缓存（ChatMemory 过期管理，防止内存泄漏） -->
-    <dependency>
-        <groupId>com.github.ben-manes.caffeine</groupId>
-        <artifactId>caffeine</artifactId>
-    </dependency>
-
     <!-- 工具类依赖 -->
     <dependency>
         <groupId>org.projectlombok</groupId>
@@ -234,7 +228,7 @@ spring:
   #   username: guest
   #   password: guest
 
-  # 异步线程池（@Async 方法依赖，如 AiChatService.saveRecordAsync）
+  # 异步线程池（@Async 方法依赖，如 AiChatAsyncService.saveRecordAsync）
   task:
     execution:
       pool:
@@ -273,9 +267,9 @@ mybatis-plus:
 **主启动类需添加的注解（缺一不可）**：
 ```java
 @SpringBootApplication
-@MapperScan("com.XI.xi_oj.mapper")
+@MapperScan({"com.XI.xi_oj.mapper", "com.XI.xi_oj.ai.store"})
 @EnableScheduling  // ← 5.10 定时同步 QuestionVectorSyncJob 依赖此注解
-@EnableAsync       // ← 5.3 AiChatService.saveRecordAsync 依赖此注解
+@EnableAsync       // ← 5.3 AiChatAsyncService.saveRecordAsync 依赖此注解
 @EnableAspectJAutoProxy(proxyTargetClass = true, exposeProxy = true)
 public class MainApplication {
     public static void main(String[] args) {
@@ -283,7 +277,7 @@ public class MainApplication {
     }
 }
 ```
-> 注：当前仓库主类已包含 `@EnableScheduling` 与 `@EnableAspectJAutoProxy`，尚未启用 `@EnableAsync`，AI 流式落地前需补齐。
+> 注：当前仓库主类已启用 `@EnableScheduling`、`@EnableAspectJAutoProxy`、`@EnableAsync`，并已将 `com.XI.xi_oj.ai.store` 加入 `@MapperScan`。
 
 ---
 
@@ -1206,39 +1200,36 @@ public class AiAgentFactory {
     }
 
     /**
-     * Caffeine 缓存：按 chatId 缓存 ChatMemory 对象
-     * - 缓存的是轻量 ChatMemory（消息列表，几KB），而非 AiService 实例（数MB）
-     * - expireAfterAccess(30min)：会话 30 分钟无活动自动释放，防止内存泄漏
-     * - maximumSize(1000)：最多同时持有 1000 个活跃会话，超出时按 LRU 淘汰
+     * Redis + MySQL 会话记忆存储
+     * - Redis：热会话窗口（低延迟）
+     * - MySQL：Redis miss 时回源，重建最近 N 轮上下文
      */
     @Bean
-    public Cache<String, ChatMemory> chatMemoryCache() {
-        return Caffeine.newBuilder()
-                .expireAfterAccess(30, TimeUnit.MINUTES)
-                .maximumSize(1000)
-                .build();
+    public ChatMemoryStore chatMemoryStore(AiChatMemoryStore aiChatMemoryStore) {
+        return aiChatMemoryStore;
     }
 
     /**
      * 5.3 AI问答 Agent：多轮记忆 + Tools + RAG + 流式/非流式双模式
-     * chatMemoryProvider 从 Caffeine 缓存取 ChatMemory，不存在则新建
-     * → 同一 chatId 跨请求复用同一个 Memory 对象，多轮历史正确保留
-     * → 框架根据方法返回值类型自动选择模型（String=阻塞，Flux=流式）
+     * - memoryId 推荐使用 userId:chatId，避免不同用户 chatId 相同导致串会话
+     * - MessageWindowChatMemory 只保留窗口大小，不负责持久化
+     * - 持久化由 ChatMemoryStore（Redis + MySQL）负责
      */
     @Bean
     public OJChatAgent ojChatAgent(ChatModel chatModel,
                                    StreamingChatModel streamingChatModel,
                                    EmbeddingModel embeddingModel,
-                                   Cache<String, ChatMemory> chatMemoryCache) {
+                                   ChatMemoryStore chatMemoryStore) {
         return AiServices.builder(OJChatAgent.class)
                 .chatLanguageModel(chatModel)
                 .streamingChatLanguageModel(streamingChatModel)
                 .tools(ojTools)
                 .contentRetriever(buildRetriever(embeddingModel))
-                .chatMemoryProvider(chatId -> chatMemoryCache.get(
-                        chatId.toString(),
-                        id -> MessageWindowChatMemory.withMaxMessages(20)
-                ))
+                .chatMemoryProvider(memoryId -> MessageWindowChatMemory.builder()
+                        .id(memoryId)
+                        .maxMessages(20)
+                        .chatMemoryStore(chatMemoryStore)
+                        .build())
                 .build();
     }
 
@@ -2083,157 +2074,204 @@ public class AiCodeAnalysisService {
 ```
 
 ### 5.3 AI问答助手模块
-**功能描述**：实现自由对话式AI问答，支持用户提问算法问题、代码调试、题目讲解，对应截图中的「AI问答」页面。
+**功能描述**：实现自由对话式 AI 问答，支持算法提问、代码调试、题目讲解，并支持多轮记忆、历史分页与清空会话。
 
-**核心流程**：
-1. 用户输入问题，系统先校验AI功能开关与用户调用次数限制；
-2. 通过RAG检索相关知识点与题目信息，拼接上下文；
-3. 传入Agent完成回答生成，支持多轮对话（通过chat_id关联会话）；
-4. 对话记录存入`ai_chat_record`表，返回给前端展示。
+**本节最终方案（已切换）**：`Redis + MySQL` 双层记忆，不再依赖 Caffeine。
 
-**Service 层实现（含 SSE 结束后异步持久化）**：
+**核心流程（当前实现口径）**：
+1. Controller 完成登录态获取、限流与请求参数校验；
+2. Service 层构造 `memoryId = userId + ":" + chatId`，防止不同用户同 chatId 串会话；
+3. Agent 通过 `MessageWindowChatMemory + ChatMemoryStore` 读写会话窗口；
+4. ChatMemoryStore 先查 Redis，未命中回源 MySQL 最近 N 轮，再回填 Redis；
+5. 非流式同步写库；流式在 `doOnComplete` 后异步写库；
+6. 清空会话时同步删除 MySQL 历史 + Redis 记忆。
 
-> **关键设计**：Reactor 的 `doOnComplete` 回调在最后一个 token 推送完毕后触发，此时用 `@Async` 方法异步写库，不阻塞 SSE 推流线程。同时提供历史记录查询和清空会话接口。
+#### 5.3.1 相关实体与请求模型（缺漏补齐）
 
+**`AiChatRecord.java`**（路径：`com.XI.xi_oj.ai.model`）：
 ```java
-@Service
-@Slf4j
-public class AiChatService {
+@Data
+@TableName("ai_chat_record")
+public class AiChatRecord implements Serializable {
 
-    @Autowired
-    private OJChatAgent ojChatAgent;
-    @Autowired
-    private AiChatRecordMapper chatRecordMapper;
-    @Autowired
-    private Cache<String, ChatMemory> chatMemoryCache; // 注入工厂中的 Caffeine 缓存
+    @TableId(type = IdType.AUTO)
+    private Long id;
 
-    /**
-     * 非流式问答 + 同步持久化
-     */
-    public String chat(String chatId, Long userId, String message) {
-        String answer = ojChatAgent.chat(chatId, message);
-        saveRecord(userId, chatId, message, answer);
-        return answer;
-    }
+    @TableField("user_id")
+    private Long userId;
 
-    /**
-     * SSE 流式问答 + 异步持久化
-     * doOnNext：每个 token 追加到 buffer；
-     * doOnComplete：流结束后用 @Async 方法异步写库，不阻塞推流线程。
-     */
-    public Flux<String> chatStream(String chatId, Long userId, String message) {
-        StringBuilder buffer = new StringBuilder();
-        return ojChatAgent.chatStream(chatId, message)
-                .doOnNext(buffer::append)
-                .doOnComplete(() -> saveRecordAsync(userId, chatId, message, buffer.toString()))
-                .doOnError(e -> log.error("[AI问答] 流式异常 chatId={}: {}", chatId, e.getMessage()));
-    }
+    private String question;
 
-    /** 同步写库（非流式场景） */
-    private void saveRecord(Long userId, String chatId, String question, String answer) {
-        AiChatRecord record = new AiChatRecord();
-        record.setUserId(userId);
-        record.setChatId(chatId);
-        record.setQuestion(question);
-        record.setAnswer(answer);
-        chatRecordMapper.insert(record);
-    }
+    private String answer;
 
-    /**
-     * 异步写库（流式场景，独立线程不阻塞 Reactor 推流线程）
-     * 依赖主类或配置类上的 @EnableAsync
-     */
-    @Async
-    public void saveRecordAsync(Long userId, String chatId, String question, String answer) {
-        try {
-            saveRecord(userId, chatId, question, answer);
-        } catch (Exception e) {
-            log.error("[AI问答] 对话记录写库失败 chatId={}: {}", chatId, e.getMessage());
-        }
-    }
+    @TableField("chat_id")
+    private String chatId;
 
-    /** 查询用户某会话的历史记录 */
-    public List<AiChatRecord> getChatHistory(Long userId, String chatId) {
-        return chatRecordMapper.selectByUserAndChat(userId, chatId);
-    }
+    @TableField("used_tokens")
+    private Integer usedTokens;
 
-    /**
-     * 清空会话历史：同时清 DB 记录 + Caffeine 中的 ChatMemory（下次对话重新开始）
-     */
-    public void clearHistory(Long userId, String chatId) {
-        chatRecordMapper.deleteByUserAndChat(userId, chatId);
-        chatMemoryCache.invalidate(chatId); // 清除 Agent 内存，多轮历史彻底清空
-        log.info("[AI问答] 已清空会话 userId={} chatId={}", userId, chatId);
-    }
+    private LocalDateTime createTime;
 }
 ```
 
-**`AiChatRecordMapper.java`（补充关键查询方法）**：
+**`AiChatHistoryPageRequest.java` / `AiChatHistoryPageResponse.java`**（路径：`com.XI.xi_oj.ai.model`）：
+```java
+@Data
+public class AiChatHistoryPageRequest {
+    @NotBlank(message = "chatId 不能为空")
+    private String chatId;
+    private LocalDateTime cursorTime;
+    private Long cursorId;
+    private Integer pageSize = 20;
+}
+
+@Data
+@Builder
+@NoArgsConstructor
+@AllArgsConstructor
+public class AiChatHistoryPageResponse {
+    private List<AiChatRecord> records;
+    private LocalDateTime nextCursorTime;
+    private Long nextCursorId;
+}
+```
+
+#### 5.3.2 Mapper（含回源与游标分页）
+
+**`AiChatRecordMapper.java`**：
 ```java
 @Mapper
 public interface AiChatRecordMapper extends BaseMapper<AiChatRecord> {
 
-    @Select("SELECT * FROM ai_chat_record WHERE user_id = #{userId} AND chat_id = #{chatId} " +
-            "ORDER BY createTime ASC")
-    List<AiChatRecord> selectByUserAndChat(@Param("userId") Long userId,
-                                            @Param("chatId") String chatId);
+    // Redis miss 回源（兼容旧格式，仅 chatId）
+    List<AiChatRecord> selectLatestByChatId(String chatId, Integer rounds);
 
-    @Delete("DELETE FROM ai_chat_record WHERE user_id = #{userId} AND chat_id = #{chatId}")
-    int deleteByUserAndChat(@Param("userId") Long userId, @Param("chatId") String chatId);
+    // Redis miss 回源（推荐格式，userId + chatId）
+    List<AiChatRecord> selectLatestByUserAndChat(Long userId, String chatId, Integer rounds);
+
+    // 历史全量
+    List<AiChatRecord> selectByUserAndChat(Long userId, String chatId);
+
+    // 游标分页
+    List<AiChatRecord> selectHistoryByCursor(Long userId, String chatId,
+                                             LocalDateTime cursorTime, Long cursorId, Integer pageSize);
+
+    // 清空历史
+    int deleteByUserAndChat(Long userId, String chatId);
 }
 ```
 
-**`AiChatRequest.java` 与 `AiChatClearRequest.java`（Controller 层请求 DTO）**：
+#### 5.3.3 ChatMemoryStore（Redis + MySQL）
+
+**`AiChatMemoryStore.java`**（路径：`com.XI.xi_oj.ai.store`）：
 ```java
-@Data
-public class AiChatRequest {
+@Component
+public class AiChatMemoryStore implements ChatMemoryStore {
 
-    @NotBlank(message = "chatId 不能为空")
-    private String chatId;
+    // getMessages:
+    // 1) redis hit -> return
+    // 2) redis miss -> query mysql latest rounds -> convert to ChatMessage -> write redis -> return
 
-    @NotBlank(message = "message 不能为空")
-    private String message;
-}
+    // updateMessages:
+    // keep last MAX_MESSAGES and overwrite redis
 
-@Data
-public class AiChatClearRequest {
-
-    @NotBlank(message = "chatId 不能为空")
-    private String chatId;
+    // deleteMessages:
+    // delete redis key
 }
 ```
-> **放置路径**：`com.XI.xi_oj.ai.model`。
 
-**Controller 层补充（历史记录 + 清空接口）**：
+> 说明：`memoryId` 兼容两种格式：`userId:chatId`（推荐）和旧格式 `chatId`（兼容历史数据）。
+
+#### 5.3.4 Agent 工厂（方法签名按 1.0.0-beta3）
+
+**`AiAgentFactory.java`（关键片段）**：
 ```java
-// 追加到 AiChatController 中
-
-@Autowired
-private AiChatService aiChatService;
-
-/** 获取对话历史记录 */
-@GetMapping("/chat/history")
-public BaseResponse<List<AiChatRecord>> getChatHistory(@RequestParam String chatId,
-                                                        HttpServletRequest httpRequest) {
-    Long userId = UserHolder.getCurrentUserId(httpRequest);
-    return ResultUtils.success(aiChatService.getChatHistory(userId, chatId));
+@Bean
+public ChatMemoryStore chatMemoryStore(AiChatMemoryStore aiChatMemoryStore) {
+    return aiChatMemoryStore;
 }
 
-/** 清空对话历史（含 Agent 记忆） */
-@PostMapping("/chat/clear")
-public BaseResponse<String> clearHistory(@RequestBody AiChatClearRequest request,
-                                          HttpServletRequest httpRequest) {
-    Long userId = UserHolder.getCurrentUserId(httpRequest);
-    aiChatService.clearHistory(userId, request.getChatId());
-    return ResultUtils.success("会话历史已清空");
+@Bean
+public OJChatAgent ojChatAgent(ChatLanguageModel chatModel,
+                               StreamingChatLanguageModel streamingChatModel,
+                               EmbeddingModel embeddingModel,
+                               MilvusEmbeddingStore embeddingStore,
+                               ChatMemoryStore chatMemoryStore) {
+    return AiServices.builder(OJChatAgent.class)
+            .chatLanguageModel(chatModel)
+            .streamingChatLanguageModel(streamingChatModel)
+            .tools(ojTools)
+            .contentRetriever(buildRetriever(embeddingModel, embeddingStore))
+            .chatMemoryProvider(memoryId -> MessageWindowChatMemory.builder()
+                    .id(memoryId)
+                    .maxMessages(20)
+                    .chatMemoryStore(chatMemoryStore)
+                    .build())
+            .build();
 }
 ```
 
-**核心功能特性**：
-- 多轮对话历史记录查看与清空（清空同步清除 Caffeine 中的 ChatMemory）；
-- 用户每日调用次数限流（见 5.9 节）；
-- SSE 流结束后 `doOnComplete` + `@Async` 异步写库，不阻塞推流；
-- 高频问题缓存优化，提升响应速度。
+> 版本注意：在 `langchain4j-milvus:1.0.0-beta3` 中，`autoCreateCollection(true)` 不存在，应使用 `autoFlushOnInsert(true)`。
+
+#### 5.3.5 Service（SSE 异步写库 + 清空联动）
+
+**`AiChatAsyncService.java`**：
+```java
+@Service
+public class AiChatAsyncService {
+    @Async
+    public void saveRecordAsync(Long userId, String chatId, String question, String answer) {
+        // insert ai_chat_record
+    }
+}
+```
+
+**`AiChatService.java` + `AiChatServiceImpl.java`**：
+```java
+public interface AiChatService {
+    String chat(String chatId, Long userId, String message);
+    Flux<String> chatStream(String chatId, Long userId, String message);
+    AiChatHistoryPageResponse getChatHistoryByCursor(Long userId, AiChatHistoryPageRequest req);
+    List<AiChatRecord> getChatHistory(Long userId, String chatId);
+    void clearHistory(Long userId, String chatId);
+}
+
+// Impl 核心点：
+// 1) memoryId = userId + ":" + chatId
+// 2) chatStream doOnComplete -> AiChatAsyncService.saveRecordAsync(...)
+// 3) clearHistory 同时删 mysql + redis（含 legacy chatId key）
+```
+
+#### 5.3.6 Controller（当前接口）
+
+**`AiChatController.java`**：
+```java
+POST /ai/chat
+GET  /ai/chat/stream
+GET  /ai/chat/history
+POST /ai/chat/history/page
+POST /ai/chat/clear
+```
+
+#### 5.3.7 开发顺序与依赖关系（新增）
+
+建议按以下顺序实现，避免循环返工：
+1. `sql/ai.sql`（确认 `ai_chat_record`）-> `AiChatRecord` 实体；
+2. `AiChatRecordMapper`（先有回源查询、游标查询、清空查询）；
+3. `AiChatMemoryStore`（依赖 Mapper + Redis + TimeUtil）；
+4. `AiAgentFactory`（注入 `ChatMemoryStore`，配置 `OJChatAgent`）；
+5. `AiChatAsyncService`（先建异步落库能力）；
+6. `AiChatService` / `AiChatServiceImpl`（串起 Agent + DB + MemoryStore）；
+7. `AiChatController`（暴露 chat/stream/history/page/clear）；
+8. `AiGlobalSwitchAspect`（全局开关拦截）；
+9. 联调顺序：非流式 -> 流式 -> 游标分页 -> 清空会话。
+
+**核心功能特性（更新后）**：
+- 多轮记忆持久化：`Redis + MySQL`，不依赖 Caffeine；
+- 会话隔离：`memoryId=userId:chatId`，避免跨用户串会话；
+- SSE 结束后异步写库，不阻塞推流；
+- 支持历史全量、游标分页、清空会话；
+- 兼容旧 key：清空时会同时删 `chatId` 旧格式记忆 key。
 
 ### 5.4 AI题目解析与相似题推荐模块
 **功能描述**：为题目提供AI自动解析，根据当前题目考点、难度推荐相似题目，帮助用户针对性练习。

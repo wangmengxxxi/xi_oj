@@ -1,17 +1,16 @@
 package com.XI.xi_oj.service.impl;
 
+import cn.hutool.core.collection.CollUtil;
 import com.XI.xi_oj.ai.agent.OJChatAgent;
 import com.XI.xi_oj.ai.model.AiChatHistoryPageRequest;
 import com.XI.xi_oj.ai.model.AiChatHistoryPageResponse;
 import com.XI.xi_oj.ai.model.AiChatRecord;
 import com.XI.xi_oj.ai.store.AiChatRecordMapper;
 import com.XI.xi_oj.service.AiChatService;
-import cn.hutool.core.collection.CollUtil;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import dev.langchain4j.store.memory.chat.ChatMemoryStore;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 
@@ -20,18 +19,24 @@ import java.util.List;
 
 @Service
 @Slf4j
-public class AiChatServiceImpl extends ServiceImpl<AiChatRecordMapper, AiChatRecord>
-        implements AiChatService {
+public class AiChatServiceImpl extends ServiceImpl<AiChatRecordMapper, AiChatRecord> implements AiChatService {
+
     @Resource
     private OJChatAgent ojChatAgent;
+
     @Resource
     private AiChatRecordMapper chatRecordMapper;
+
     @Resource
     private ChatMemoryStore chatMemoryStore;
 
+    @Resource
+    private AiChatAsyncService aiChatAsyncService;
+
     @Override
     public String chat(String chatId, Long userId, String message) {
-        String answer = ojChatAgent.chat(chatId, message);
+        String memoryId = buildMemoryId(userId, chatId);
+        String answer = ojChatAgent.chat(memoryId, message);
         saveRecord(userId, chatId, message, answer);
         return answer;
     }
@@ -39,17 +44,25 @@ public class AiChatServiceImpl extends ServiceImpl<AiChatRecordMapper, AiChatRec
     @Override
     public Flux<String> chatStream(String chatId, Long userId, String message) {
         StringBuilder buffer = new StringBuilder();
-        return ojChatAgent.chatStream(chatId, message)
+        String memoryId = buildMemoryId(userId, chatId);
+        return ojChatAgent.chatStream(memoryId, message)
                 .doOnNext(buffer::append)
-                .doOnComplete(() -> saveRecordAsync(userId, chatId, message, buffer.toString()))
-                .doOnError(e -> log.error("[AI问答] 流式异常 chatId={}: {}", chatId, e.getMessage()));
+                .doOnComplete(() -> aiChatAsyncService.saveRecordAsync(userId, chatId, message, buffer.toString()))
+                .doOnError(e -> log.error("[AI Chat] stream failed, chatId={}", chatId, e));
     }
 
     @Override
     public AiChatHistoryPageResponse getChatHistoryByCursor(Long userId, AiChatHistoryPageRequest req) {
-        int pageSize = Math.min(Math.max(req.getPageSize(), 1), 50);
+        int requestedPageSize = req.getPageSize() == null ? 20 : req.getPageSize();
+        int pageSize = Math.min(Math.max(requestedPageSize, 1), 50);
+
         List<AiChatRecord> rows = chatRecordMapper.selectHistoryByCursor(
-                userId, req.getChatId(), req.getCursorTime(), req.getCursorId(), pageSize);
+                userId,
+                req.getChatId(),
+                req.getCursorTime(),
+                req.getCursorId(),
+                pageSize
+        );
 
         LocalDateTime nextCursorTime = null;
         Long nextCursorId = null;
@@ -62,10 +75,17 @@ public class AiChatServiceImpl extends ServiceImpl<AiChatRecordMapper, AiChatRec
     }
 
     @Override
+    public List<AiChatRecord> getChatHistory(Long userId, String chatId) {
+        return chatRecordMapper.selectByUserAndChat(userId, chatId);
+    }
+
+    @Override
     public void clearHistory(Long userId, String chatId) {
         chatRecordMapper.deleteByUserAndChat(userId, chatId);
+        chatMemoryStore.deleteMessages(buildMemoryId(userId, chatId));
+        // backward compatibility: clear legacy key where memoryId == chatId
         chatMemoryStore.deleteMessages(chatId);
-        log.info("[AI问答] 已清空会话 userId={} chatId={}", userId, chatId);
+        log.info("[AI Chat] history cleared, userId={}, chatId={}", userId, chatId);
     }
 
     private void saveRecord(Long userId, String chatId, String question, String answer) {
@@ -77,12 +97,10 @@ public class AiChatServiceImpl extends ServiceImpl<AiChatRecordMapper, AiChatRec
         chatRecordMapper.insert(record);
     }
 
-    @Async
-    public void saveRecordAsync(Long userId, String chatId, String question, String answer) {
-        try {
-            saveRecord(userId, chatId, question, answer);
-        } catch (Exception e) {
-            log.error("[AI问答] 对话记录写库失败 chatId={}: {}", chatId, e.getMessage());
+    private String buildMemoryId(Long userId, String chatId) {
+        if (userId == null) {
+            return chatId;
         }
+        return userId + ":" + chatId;
     }
 }

@@ -14,7 +14,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  * @from <a href="https://yupi.icu">编程导航知识星球</a>
  */
 @SpringBootApplication
-@MapperScan("com.XI.xi_oj.mapper")
+@MapperScan({"com.XI.xi_oj.mapper", "com.XI.xi_oj.ai.store"})
 @EnableAsync
 @EnableScheduling
 @EnableAspectJAutoProxy(proxyTargetClass = true, exposeProxy = true)

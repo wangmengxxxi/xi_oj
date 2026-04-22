@@ -4,10 +4,14 @@ import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.StrUtil;
 import com.XI.xi_oj.ai.model.AiChatRecord;
 import com.XI.xi_oj.utils.TimeUtil;
-import dev.langchain4j.data.message.*;
+import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.data.message.ChatMessage;
+import dev.langchain4j.data.message.ChatMessageDeserializer;
+import dev.langchain4j.data.message.ChatMessageSerializer;
+import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.store.memory.chat.ChatMemoryStore;
 import jakarta.annotation.Resource;
-import lombok.extern.slf4j.Slf4j;
+import lombok.Getter;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
@@ -15,44 +19,41 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-
 @Component
-@Slf4j
 public class AiChatMemoryStore implements ChatMemoryStore {
 
     private static final String MEMORY_KEY_PREFIX = "ai:chat:memory:";
-    private static final int MAX_MESSAGES = 20;        // 与 MessageWindowChatMemory 保持一致
-    private static final int BACKFILL_ROUNDS = 10;     // 1轮=1问1答，10轮≈20条消息
+    private static final int MAX_MESSAGES = 20;
+    private static final int BACKFILL_ROUNDS = 10;
     private static final long MEMORY_TTL_MINUTES = 120;
 
     @Resource
     private StringRedisTemplate redisTemplate;
+
     @Resource
     private AiChatRecordMapper aiChatRecordMapper;
 
     @Override
     public List<ChatMessage> getMessages(Object memoryId) {
-        String chatId = String.valueOf(memoryId);
-        String key = MEMORY_KEY_PREFIX + chatId;
+        MemorySession session = MemorySession.from(memoryId);
+        String key = MEMORY_KEY_PREFIX + session.getRedisSuffix();
 
-        // 1) 先查 Redis
         String cached = redisTemplate.opsForValue().get(key);
         if (StrUtil.isNotBlank(cached)) {
             return ChatMessageDeserializer.messagesFromJson(cached);
         }
 
-        // 2) Redis miss：从 MySQL 回源（最近 N 轮），并回填 Redis
-        List<AiChatRecord> records = aiChatRecordMapper.selectLatestByChatId(chatId, BACKFILL_ROUNDS);
+        List<AiChatRecord> records = loadLatestRecords(session);
         if (CollUtil.isEmpty(records)) {
             return new ArrayList<>();
         }
-        Collections.reverse(records); // DB 是倒序查出，反转后恢复时间正序
+        Collections.reverse(records);
 
         List<ChatMessage> messages = new ArrayList<>(records.size() * 2);
-        for (AiChatRecord r : records) {
-            messages.add(UserMessage.from(r.getQuestion()));
-            if (StrUtil.isNotBlank(r.getAnswer())) {
-                messages.add(AiMessage.from(r.getAnswer()));
+        for (AiChatRecord record : records) {
+            messages.add(UserMessage.from(record.getQuestion()));
+            if (StrUtil.isNotBlank(record.getAnswer())) {
+                messages.add(AiMessage.from(record.getAnswer()));
             }
         }
         saveToRedis(key, messages);
@@ -61,23 +62,74 @@ public class AiChatMemoryStore implements ChatMemoryStore {
 
     @Override
     public void updateMessages(Object memoryId, List<ChatMessage> messages) {
-        String key = MEMORY_KEY_PREFIX + memoryId;
+        MemorySession session = MemorySession.from(memoryId);
+        String key = MEMORY_KEY_PREFIX + session.getRedisSuffix();
 
-        // 双保险：仅保留最后 MAX_MESSAGES 条
         List<ChatMessage> window = messages.size() <= MAX_MESSAGES
                 ? messages
                 : new ArrayList<>(messages.subList(messages.size() - MAX_MESSAGES, messages.size()));
-
         saveToRedis(key, window);
     }
 
     @Override
     public void deleteMessages(Object memoryId) {
-        redisTemplate.delete(MEMORY_KEY_PREFIX + memoryId);
+        MemorySession session = MemorySession.from(memoryId);
+        redisTemplate.delete(MEMORY_KEY_PREFIX + session.getRedisSuffix());
+    }
+
+    private List<AiChatRecord> loadLatestRecords(MemorySession session) {
+        if (session.hasUserScope()) {
+            return aiChatRecordMapper.selectLatestByUserAndChat(
+                    session.getUserId(),
+                    session.getChatId(),
+                    BACKFILL_ROUNDS
+            );
+        }
+        return aiChatRecordMapper.selectLatestByChatId(session.getChatId(), BACKFILL_ROUNDS);
     }
 
     private void saveToRedis(String key, List<ChatMessage> messages) {
         String json = ChatMessageSerializer.messagesToJson(messages);
         redisTemplate.opsForValue().set(key, json, TimeUtil.minutes(MEMORY_TTL_MINUTES));
+    }
+
+    @Getter
+    private static final class MemorySession {
+
+        private final String redisSuffix;
+        private final Long userId;
+        private final String chatId;
+
+        private MemorySession(String redisSuffix, Long userId, String chatId) {
+            this.redisSuffix = redisSuffix;
+            this.userId = userId;
+            this.chatId = chatId;
+        }
+
+        static MemorySession from(Object memoryId) {
+            String raw = String.valueOf(memoryId);
+            if (StrUtil.isBlank(raw)) {
+                return new MemorySession("default", null, "default");
+            }
+
+            int splitIndex = raw.indexOf(':');
+            if (splitIndex > 0 && splitIndex < raw.length() - 1) {
+                String userPart = raw.substring(0, splitIndex);
+                String chatPart = raw.substring(splitIndex + 1);
+                try {
+                    Long userId = Long.parseLong(userPart);
+                    if (StrUtil.isNotBlank(chatPart)) {
+                        return new MemorySession(raw, userId, chatPart);
+                    }
+                } catch (NumberFormatException ignored) {
+                    // fall through to legacy format
+                }
+            }
+            return new MemorySession(raw, null, raw);
+        }
+
+        boolean hasUserScope() {
+            return userId != null;
+        }
     }
 }
