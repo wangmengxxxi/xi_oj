@@ -11,11 +11,13 @@ import com.XI.xi_oj.judge.codesandbox.model.ExecuteCodeResponse;
 import com.XI.xi_oj.judge.strategy.JudgeContext;
 import com.XI.xi_oj.model.dto.question.JudgeCase;
 import com.XI.xi_oj.judge.codesandbox.model.JudgeInfo;
+import com.XI.xi_oj.model.dto.judge.JudgeResultDTO;
 import com.XI.xi_oj.model.entity.Question;
 import com.XI.xi_oj.model.entity.QuestionSubmit;
 import com.XI.xi_oj.model.enums.QuestionSubmitStatusEnum;
 import com.XI.xi_oj.service.QuestionService;
 import com.XI.xi_oj.service.QuestionSubmitService;
+import com.XI.xi_oj.service.impl.WrongQuestionCollector;
 import jakarta.annotation.Resource;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -34,6 +36,9 @@ public class JudgeServiceImpl implements JudgeService {
 
     @Resource
     private JudgeManager judgeManager;
+
+    @Resource
+    private WrongQuestionCollector wrongQuestionCollector;
 
     @Value("${codesandbox.type:example}")
     private String type;
@@ -96,12 +101,40 @@ public class JudgeServiceImpl implements JudgeService {
             questionSubmitUpdate.setStatus(QuestionSubmitStatusEnum.SUCCEED.getValue());
             questionSubmitUpdate.setJudgeInfo(JSONUtil.toJsonStr(judgeInfo));
             questionSubmitService.updateById(questionSubmitUpdate);
+
+            JudgeResultDTO judgeResultDTO = JudgeResultDTO.builder()
+                    .status(judgeInfo.getMessage())
+                    .timeUsed(judgeInfo.getTime())
+                    .memoryUsed(judgeInfo.getMemory())
+                    .errorMsg(judgeInfo.getMessage())
+                    .build();
+            wrongQuestionCollector.collect(
+                    questionSubmit.getUserId(),
+                    questionSubmit.getQuestionId(),
+                    questionSubmit.getCode(),
+                    questionSubmit.getLanguage(),
+                    judgeResultDTO,
+                    questionSubmit.getSource()
+            );
         } catch (Exception e) {
             // 沙箱调用失败，将状态置为失败
             questionSubmitUpdate = new QuestionSubmit();
             questionSubmitUpdate.setId(questionSubmitId);
             questionSubmitUpdate.setStatus(QuestionSubmitStatusEnum.FAILED.getValue());
             questionSubmitService.updateById(questionSubmitUpdate);
+
+            JudgeResultDTO judgeResultDTO = JudgeResultDTO.builder()
+                    .status("System Error")
+                    .errorMsg(e.getMessage())
+                    .build();
+            wrongQuestionCollector.collect(
+                    questionSubmit.getUserId(),
+                    questionSubmit.getQuestionId(),
+                    questionSubmit.getCode(),
+                    questionSubmit.getLanguage(),
+                    judgeResultDTO,
+                    questionSubmit.getSource()
+            );
             throw e;
         }
         return questionSubmitService.getById(questionSubmitId);

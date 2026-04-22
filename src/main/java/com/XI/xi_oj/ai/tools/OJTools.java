@@ -11,34 +11,43 @@ import dev.langchain4j.agent.tool.Tool;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+/**
+ * OJTools类，用于在线判题系统的相关功能实现
+ * 包含题目查询、代码判题和错题记录查询等功能
+ */
 @Component
 public class OJTools {
 
     @Autowired
-    private QuestionService questionService;
+    private QuestionService questionService; // 注入题目服务，用于处理题目相关操作
 
     @Autowired
-    private AiJudgeService judgeService;
+    private AiJudgeService judgeService; // 注入判题服务，用于处理代码判题相关操作
 
     @Autowired
-    private WrongQuestionService wrongQuestionService;
+    private WrongQuestionService wrongQuestionService; // 注入错题服务，用于处理错题记录相关操作
 
+    /**
+     * 查询题目信息的工具方法
+     * @param keyword 搜索关键词，可以是题目ID或题目标题等
+     * @return 返回格式化的题目信息，包括ID、标题、题干、标签、难度和参考答案
+     */
     @Tool(
             name = "query_question_info",
-            value = "Query question details by id or keyword and return title, content, tags, difficulty, and answer."
+            value = "查询题目信息，可根据题目ID或关键词检索，返回题目标题、题干、标签、难度和参考答案。"
     )
     public String queryQuestionInfo(String keyword) {
-        QuestionVO question = questionService.getByKeyword(keyword);
-        if (question == null) {
-            return "Question not found. Please verify id or keyword.";
+        QuestionVO question = questionService.getByKeyword(keyword); // 根据关键词获取题目信息
+        if (question == null) { // 如果未找到题目，返回提示信息
+            return "未找到对应题目，请检查题目ID或关键词是否正确。";
         }
         return String.format("""
-                        Question ID: %d
-                        Title: %s
-                        Content: %s
-                        Tags: %s
-                        Difficulty: %s
-                        Reference Answer: %s
+                        题目ID：%d
+                        标题：%s
+                        题干：%s
+                        标签：%s
+                        难度：%s
+                        参考答案：%s
                         """,
                 question.getId(),
                 question.getTitle(),
@@ -49,22 +58,30 @@ public class OJTools {
         );
     }
 
+    /**
+     * 执行用户代码判题的工具方法
+     * @param questionId 题目ID，指定要判题的题目
+     * @param code 用户提交的代码内容
+     * @param language 编程语言类型，如java/python/cpp等
+     * @param userId 当前用户ID，用于标识提交代码的用户
+     * @return 返回格式化的判题结果，包括状态、耗时、内存使用和错误信息
+     */
     @Tool(
             name = "judge_user_code",
-            value = "Run judging for user code. Args: questionId, code, language, userId."
+            value = "对用户代码执行判题。参数包含：questionId、code、language、userId。"
     )
     public String judgeUserCode(
-            @P("Question id, Long type") Long questionId,
-            @P("User code content") String code,
-            @P("Language, e.g. java / python / cpp") String language,
-            @P("Current user id, Long type") Long userId
+            @P("题目ID，Long类型") Long questionId,
+            @P("用户提交的代码内容") String code,
+            @P("代码语言，例如 java / python / cpp") String language,
+            @P("当前用户ID，Long类型") Long userId
     ) {
-        JudgeResultDTO result = judgeService.submitCode(questionId, code, language, userId);
+        JudgeResultDTO result = judgeService.submitCode(questionId, code, language, userId); // 提交代码进行判题
         return String.format("""
-                        Judge Result: %s
-                        Time Used: %sms
-                        Memory Used: %sMB
-                        Error Message: %s
+                        判题结果：%s
+                        耗时：%sms
+                        内存：%sMB
+                        错误信息：%s
                         """,
                 result.getStatus(),
                 result.getTimeUsed(),
@@ -73,23 +90,29 @@ public class OJTools {
         );
     }
 
+    /**
+     * 查询用户错题记录的工具方法
+     * @param userId 用户ID，指定要查询的用户
+     * @param questionId 题目ID，指定要查询的题目
+     * @return 返回格式化的错题记录信息，包括错误代码、判题结果、历史分析和复习次数
+     */
     @Tool(
             name = "query_user_wrong_question",
-            value = "Query one wrong-question record by userId and questionId."
+            value = "按 userId 和 questionId 查询用户错题记录，返回错误代码、判题结果、历史分析和复习次数。"
     )
     public String queryUserWrongQuestion(
-            @P("User id, Long type") Long userId,
-            @P("Question id, Long type") Long questionId
+            @P("用户ID，Long类型") Long userId,
+            @P("题目ID，Long类型") Long questionId
     ) {
-        WrongQuestionVO wrongQuestion = wrongQuestionService.getByUserAndQuestion(userId, questionId);
-        if (wrongQuestion == null) {
-            return "No wrong-question record found.";
+        WrongQuestionVO wrongQuestion = wrongQuestionService.getByUserAndQuestion(userId, questionId); // 获取用户的错题记录
+        if (wrongQuestion == null) { // 如果未找到错题记录，返回提示信息
+            return "未找到对应错题记录。";
         }
         return String.format("""
-                        Wrong Code: %s
-                        Wrong Judge Result: %s
-                        Historical Analysis: %s
-                        Review Count: %d
+                        错误代码：%s
+                        错误判题结果：%s
+                        历史分析：%s
+                        复习次数：%d
                         """,
                 wrongQuestion.getWrongCode(),
                 wrongQuestion.getWrongJudgeResult(),

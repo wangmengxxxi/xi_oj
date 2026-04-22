@@ -8,6 +8,8 @@ import dev.langchain4j.community.model.dashscope.QwenEmbeddingModel;
 import dev.langchain4j.community.model.dashscope.QwenStreamingChatModel;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import dev.langchain4j.model.chat.StreamingChatLanguageModel;
+import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.rag.content.retriever.ContentRetriever;
 import dev.langchain4j.rag.content.retriever.EmbeddingStoreContentRetriever;
@@ -17,8 +19,10 @@ import dev.langchain4j.store.memory.chat.ChatMemoryStore;
 import io.milvus.param.MetricType;
 import jakarta.annotation.Resource;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import reactor.core.publisher.Flux;
 
 @Configuration
 public class AiAgentFactory {
@@ -49,6 +53,18 @@ public class AiAgentFactory {
                 .host(milvusHost)
                 .port(milvusPort)
                 .collectionName("oj_knowledge")
+                .dimension(1024)
+                .autoFlushOnInsert(true)
+                .metricType(MetricType.COSINE)
+                .build();
+    }
+
+    @Bean
+    public MilvusEmbeddingStore questionEmbeddingStore() {
+        return MilvusEmbeddingStore.builder()
+                .host(milvusHost)
+                .port(milvusPort)
+                .collectionName("oj_question")
                 .dimension(1024)
                 .autoFlushOnInsert(true)
                 .metricType(MetricType.COSINE)
@@ -92,6 +108,7 @@ public class AiAgentFactory {
     public OJChatAgent ojChatAgent(ChatLanguageModel chatModel,
                                    StreamingChatLanguageModel streamingChatModel,
                                    EmbeddingModel embeddingModel,
+                                   @Qualifier("embeddingStore")
                                    MilvusEmbeddingStore embeddingStore,
                                    ChatMemoryStore chatMemoryStore) {
         return AiServices.builder(OJChatAgent.class)
@@ -109,10 +126,39 @@ public class AiAgentFactory {
     }
 
     @Bean
-    public OJStreamingService ojStreamingService(StreamingChatLanguageModel streamingChatModel) {
-        return AiServices.builder(OJStreamingService.class)
+    public OJQuestionParseAgent ojQuestionParseAgent(ChatLanguageModel chatModel,
+                                                     StreamingChatLanguageModel streamingChatModel,
+                                                     EmbeddingModel embeddingModel,
+                                                     @Qualifier("embeddingStore")
+                                                     MilvusEmbeddingStore embeddingStore) {
+        return AiServices.builder(OJQuestionParseAgent.class)
+                .chatLanguageModel(chatModel)
                 .streamingChatLanguageModel(streamingChatModel)
+                .contentRetriever(buildRetriever(embeddingModel, embeddingStore))
                 .build();
+    }
+
+    @Bean
+    public OJStreamingService ojStreamingService(StreamingChatLanguageModel streamingChatModel) {
+        return fullPrompt -> Flux.create(sink -> streamingChatModel.chat(
+                fullPrompt,
+                new StreamingChatResponseHandler() {
+                    @Override
+                    public void onPartialResponse(String partialResponse) {
+                        sink.next(partialResponse == null ? "" : partialResponse);
+                    }
+
+                    @Override
+                    public void onCompleteResponse(ChatResponse chatResponse) {
+                        sink.complete();
+                    }
+
+                    @Override
+                    public void onError(Throwable error) {
+                        sink.error(error);
+                    }
+                }
+        ));
     }
 
     private ContentRetriever buildRetriever(EmbeddingModel embeddingModel,

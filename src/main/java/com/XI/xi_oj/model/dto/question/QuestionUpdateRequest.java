@@ -41,6 +41,11 @@ public class QuestionUpdateRequest implements Serializable {
     private String answer;
 
     /**
+     * 题目难度easy / medium / hard
+     */
+    private String difficulty;
+
+    /**
      * 判题用例
      */
     private List<JudgeCase> judgeCase;

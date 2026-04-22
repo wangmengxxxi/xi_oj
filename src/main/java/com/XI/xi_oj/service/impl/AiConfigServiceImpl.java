@@ -64,6 +64,29 @@ public class AiConfigServiceImpl extends ServiceImpl<AiConfigMapper, AiConfig> i
             log.warn("[AiConfig] prompt {} missing, fallback to default", promptKey);
             return defaultValue;
         }
+        if (looksLikeMojibake(value)) {
+            log.warn("[AiConfig] prompt {} looks garbled, fallback to default", promptKey);
+            return defaultValue;
+        }
         return value;
+    }
+
+    /**
+     * 检测常见 UTF-8/GBK 误解码后的乱码特征，避免错误 Prompt 直接进入模型。
+     */
+    private boolean looksLikeMojibake(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        if (text.contains("\uFFFD")) {
+            return true;
+        }
+        String[] mojibakeMarkers = {"锛", "銆", "闂", "妫€", "鏈煡", "鏃?"};
+        for (String marker : mojibakeMarkers) {
+            if (text.contains(marker)) {
+                return true;
+            }
+        }
+        return false;
     }
 }

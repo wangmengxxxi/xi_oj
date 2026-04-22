@@ -40,6 +40,11 @@ public class Question implements Serializable {
     private String answer;
 
     /**
+     * 题目难度（easy / medium / hard）
+     */
+    private String difficulty;
+
+    /**
      * 题目提交数
      */
     private Integer submitNum;

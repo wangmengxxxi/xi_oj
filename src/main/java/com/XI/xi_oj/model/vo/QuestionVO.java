@@ -90,8 +90,6 @@ public class QuestionVO implements Serializable {
     private String answer;
     /**
      * 题目难度（easy / medium / hard）
-     * 注意：当前 question 表无 difficulty 列，此字段默认为 null。
-     * 后续在 question 表新增 difficulty varchar(16) 列并在 Question 实体添加对应字段后自动生效。
      */
     private String difficulty;
 

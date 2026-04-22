@@ -1,0 +1,186 @@
+package com.XI.xi_oj.ai.rag;
+
+import com.XI.xi_oj.common.ErrorCode;
+import com.XI.xi_oj.exception.BusinessException;
+import dev.langchain4j.data.document.Metadata;
+import dev.langchain4j.data.embedding.Embedding;
+import dev.langchain4j.data.segment.TextSegment;
+import dev.langchain4j.model.embedding.EmbeddingModel;
+import dev.langchain4j.store.embedding.EmbeddingMatch;
+import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
+import dev.langchain4j.store.embedding.milvus.MilvusEmbeddingStore;
+import jakarta.annotation.Resource;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.stereotype.Component;
+import org.springframework.util.StreamUtils;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+@Component
+@Slf4j
+public class KnowledgeInitializer implements CommandLineRunner {
+
+    private static final String[] KNOWLEDGE_FILES = {
+            "knowledge/algorithm_knowledge.md",
+            "knowledge/error_analysis.md"
+    };
+
+    @Resource
+    @Qualifier("embeddingStore")
+    private MilvusEmbeddingStore embeddingStore;
+
+    @Resource
+    private EmbeddingModel embeddingModel;
+
+    @Resource
+    private OJKnowledgeRetriever ojKnowledgeRetriever;
+
+    @Override
+    public void run(String... args) {
+        if (hasKnowledgeData()) {
+            log.info("[Knowledge Init] knowledge collection already has data, skip bootstrap import");
+            return;
+        }
+        log.info("[Knowledge Init] knowledge collection is empty, start importing classpath markdown files");
+        for (String filePath : KNOWLEDGE_FILES) {
+            importFromClasspath(filePath);
+        }
+    }
+
+    public int parseAndStore(String markdownContent) {
+        if (markdownContent == null || markdownContent.isBlank()) {
+            return 0;
+        }
+        String normalized = markdownContent.replace("\uFEFF", "");
+        String[] blocks = normalized.split("(?m)^---\\s*$");
+        int importedCount = 0;
+        int skippedCount = 0;
+        for (int i = 0; i < blocks.length; i++) {
+            String block = blocks[i] == null ? "" : blocks[i].trim();
+            if (block.isEmpty()) {
+                continue;
+            }
+            TextSegment segment = parseBlock(block, i + 1);
+            if (segment == null) {
+                skippedCount++;
+                continue;
+            }
+            Embedding embedding = embeddingModel.embed(segment.text()).content();
+            embeddingStore.add(embedding, segment);
+            importedCount++;
+        }
+        if (importedCount > 0) {
+            ojKnowledgeRetriever.clearRagCache();
+        }
+        log.info("[Knowledge Init] import finished, imported={}, skipped={}", importedCount, skippedCount);
+        return importedCount;
+    }
+
+    private void importFromClasspath(String filePath) {
+        try {
+            ClassPathResource resource = new ClassPathResource(filePath);
+            if (!resource.exists()) {
+                log.warn("[Knowledge Init] classpath resource not found: {}", filePath);
+                return;
+            }
+            String content = StreamUtils.copyToString(resource.getInputStream(), StandardCharsets.UTF_8);
+            int count = parseAndStore(content);
+            log.info("[Knowledge Init] imported {} knowledge blocks from {}", count, filePath);
+        } catch (IOException e) {
+            log.error("[Knowledge Init] import failed, filePath={}", filePath, e);
+        }
+    }
+
+    private boolean hasKnowledgeData() {
+        try {
+            Embedding probe = embeddingModel.embed("knowledge init probe").content();
+            List<EmbeddingMatch<TextSegment>> existing = embeddingStore.search(
+                    EmbeddingSearchRequest.builder()
+                            .queryEmbedding(probe)
+                            .maxResults(1)
+                            .minScore(0.0)
+                            .build()
+            ).matches();
+            return existing != null && !existing.isEmpty();
+        } catch (Exception e) {
+            log.warn("[Knowledge Init] failed to probe knowledge collection, fallback to import attempt", e);
+            return false;
+        }
+    }
+
+    private TextSegment parseBlock(String block, int blockIndex) {
+        List<String> lines = Arrays.stream(block.split("\\R", -1))
+                .map(line -> line == null ? "" : line.trim())
+                .collect(Collectors.toList());
+        if (lines.size() < 4) {
+            log.warn("[Knowledge Init] skip block {} because it is too short", blockIndex);
+            return null;
+        }
+
+        Map<String, String> metadataMap = new HashMap<>(4);
+        int cursor = 0;
+        while (cursor < lines.size()) {
+            String line = lines.get(cursor);
+            if (line.isEmpty()) {
+                cursor++;
+                break;
+            }
+            int separatorIndex = line.indexOf(':');
+            if (separatorIndex < 0) {
+                log.warn("[Knowledge Init] skip block {} because metadata line is invalid: {}", blockIndex, line);
+                return null;
+            }
+            String key = line.substring(0, separatorIndex).trim();
+            String value = line.substring(separatorIndex + 1).trim();
+            metadataMap.put(key, value);
+            cursor++;
+        }
+
+        String contentType = metadataMap.get("content_type");
+        String tag = metadataMap.get("tag");
+        String title = metadataMap.get("title");
+        if (isBlank(contentType) || isBlank(tag) || isBlank(title)) {
+            log.warn("[Knowledge Init] skip block {} because metadata is incomplete: {}", blockIndex, metadataMap);
+            return null;
+        }
+
+        String body = lines.subList(cursor, lines.size()).stream()
+                .collect(Collectors.joining("\n"))
+                .trim();
+        if (body.isBlank()) {
+            log.warn("[Knowledge Init] skip block {} because body is blank", blockIndex);
+            return null;
+        }
+
+        if (body.length() < 80 || body.length() > 600) {
+            log.warn("[Knowledge Init] block {} length={} is outside recommended range [80, 600]",
+                    blockIndex, body.length());
+        }
+
+        Map<String, Object> segmentMetadata = new HashMap<>(4);
+        segmentMetadata.put("content_type", contentType);
+        segmentMetadata.put("tag", tag);
+        segmentMetadata.put("title", title);
+        String fullText = title + "\n" + body;
+        return TextSegment.from(fullText, Metadata.from(segmentMetadata));
+    }
+
+    public void validateImportedCount(int importedCount) {
+        if (importedCount <= 0) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "未解析到可导入的知识条目");
+        }
+    }
+
+    private boolean isBlank(String value) {
+        return value == null || value.isBlank();
+    }
+}

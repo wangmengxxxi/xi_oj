@@ -3,10 +3,10 @@
 适用范围：IOJ平台现有项目二次开发、AIGC能力落地
 更新日期：2026年04月
 
-> **当前落地状态（2026-04-16）**
-> 1. 当前仓库已完成 AIGC 相关依赖、配置与 SQL 预埋（LangChain4j / DashScope / Milvus / `ai.sql`），但 AI 业务代码尚未正式落地；
-> 2. 本文档中带完整代码块的章节为“目标实现方案”，需按现有项目基线（Java 21、Spring Boot 3.3.x、`server.servlet.context-path=/api`）进行适配；
-> 3. 现有提交限流（submit 维度）已上线，AI 专属限流维度为待扩展项（见 5.9）。
+> **当前落地状态（2026-04-22）**
+> 1. 当前仓库已完成 AIGC 相关依赖、配置、SQL 预埋及大部分核心业务代码落地，包含 AI 问答、AI 错题分析、AI 题目解析、题目评论区、题目向量同步等模块；
+> 2. 本文档中仍保留了部分“目标实现方案”式代码块，但涉及 5.3 / 5.4 / 5.5 / 5.10 的章节已按当前仓库真实实现方式同步更新；
+> 3. 现有提交限流（submit 维度）与 AI 专属限流（见 5.9）均已接入，后续新增 AI 接口应继续复用同一套限流体系。
 
 ## 一、方案概述
 ### 1.1 项目背景
@@ -411,6 +411,7 @@ CREATE TABLE IF NOT EXISTS ai_wrong_question
     user_id             bigint NOT NULL comment '用户id',
     question_id         bigint NOT NULL comment '题目id',
     wrong_code          text NOT NULL comment '错误代码',
+    language            varchar(32) comment '错误提交对应的代码语言',
     wrong_judge_result  varchar(32) NOT NULL comment '错误判题结果',
     wrong_analysis      text comment 'AI错误分析',
     review_plan         text comment 'AI生成的复习计划',
@@ -426,6 +427,11 @@ CREATE TABLE IF NOT EXISTS ai_wrong_question
 ) comment 'AI错题本表' collate = utf8mb4_unicode_ci;
 ```
 
+> 增量迁移脚本：`sql/ai_schema_patch_20260422.sql`
+> 
+> - `question` 表新增 `difficulty varchar(16)`
+> - `ai_wrong_question` 表新增 `language varchar(32)`
+
 ### 4.3 向量库存储规范
 向量库采用Milvus，集合名`oj_knowledge`，严格遵循以下存储规范，保证RAG检索的精准性。
 
@@ -437,7 +443,7 @@ CREATE TABLE IF NOT EXISTS ai_wrong_question
 | text | varchar | 原始文本内容 |
 | question_id | bigint | 关联题目id（可选） |
 | tag | varchar | 标签/考点（如哈希表、动态规划） |
-| difficulty | varchar | 难度（可选扩展字段；当前 `question` 实体无该字段） |
+| difficulty | varchar | 难度（已在 `question` 表中落地，建议值：easy / medium / hard） |
 | content_type | varchar | 内容类型（题目/题解/知识点/代码模板/错题分析） |
 
 #### 4.3.2 存储内容范围
@@ -566,8 +572,9 @@ public class OJKnowledgeRetriever {
 
 > **当前项目落地状态（2026-04-20）**
 > - 文档层已明确 `knowledge/*.md` 的 `---` 分块规范（200-400字/条）与质检标准；
-> - 仓库中尚未落地独立的知识导入任务类（如 `KnowledgeInitializer` / `QuestionVectorSyncJob`），分块长度校验与入库前告警仍为待实现项；
-> - 建议在后续导入实现的 `parseAndStore` 流程中新增“超长拆分、过短合并、异常条目跳过并记录日志”三项保护。
+> - 仓库已落地 `KnowledgeInitializer`、`KnowledgeImportController`、`QuestionVectorSyncJob`，知识库初始化、管理员手动导入、题目向量定时同步三条链路均已具备真实代码；
+> - `KnowledgeInitializer.parseAndStore(...)` 已支持 `---` 分块解析、元数据校验、异常条目跳过、长度告警、导入后清理 RAG 缓存；
+> - 当前仍建议后续继续增强“超长自动拆分、过短自动合并、导入失败条目落盘报告”三项能力，作为知识库运维优化项。
 > **原则**：每条知识点独立、完整，过长则拆分，过短则合并。分块质量是比混合检索更有效的精度提升手段。
 
 **知识文件分块规范（实操指南）**：
@@ -601,24 +608,53 @@ title: 常见算法合集
 
 #### 5.1.1.2 RAG 优化方向二：丰富 metadata 字段（精准过滤）
 
-> **当前项目落地状态（2026-04-20）**
-> - `src/main/java/com/XI/xi_oj/ai/OJKnowledgeRetriever.java` 的 `retrieveByType(...)` 已支持基于 `content_type` 的二次过滤；
-> - `algorithm_type` / `difficulty` 元数据增强链路（向量同步时写入 + 检索时过滤）尚未在仓库形成完整实现；
-> - 本节 `inferAlgorithmType` 与 `retrieveByTypeAndDifficulty` 代码可作为下一阶段落地模板。
-在现有 `content_type`、`tag` 基础上，优先补充 `algorithm_type` 字段；`difficulty` 建议作为后续题库字段扩展后再接入，使 `retrieveByType` 能更精准地缩小候选集。
+> **当前项目落地状态（2026-04-22）**
+> - `OJKnowledgeRetriever.retrieveByType(...)` 已支持基于 `content_type` 的知识库检索；
+> - 题目向量现已从知识库向量中独立拆分到 `oj_question` collection，避免知识点检索与题目相似检索互相污染；
+> - `question.difficulty` 已在题目向量同步时写入 metadata，并在相似题检索时支持按难度过滤；
+> - `algorithm_type` 元数据增强链路仍未落地，属于下一阶段优化项。
+当前实现已经把 `difficulty` 正式接入“题目向量同步 -> 相似题检索”这条链，但 `algorithm_type` 仍然建议保留为后续增强方向。
 
-**向量库导入时的 metadata 增强（修改 `QuestionVectorSyncJob`）**：
+**题目向量同步时写入 difficulty metadata（已落地）**：
 ```java
-// 在 QuestionVectorSyncJob.syncQuestionsToMilvus() 中增强 metadata
-String tagText = q.getTags(); // 当前项目中 tags 为 JSON 字符串
-Map<String, Object> metadataMap = new HashMap<>();
-metadataMap.put("question_id", q.getId());
-metadataMap.put("content_type", "题目");
-metadataMap.put("tag", tagText);                              // 原有
-metadataMap.put("algorithm_type", inferAlgorithmType(tagText)); // ← 新增：查找/排序/DP/图/贪心等
-// 若后续为 question 增加 difficulty 字段，再追加：
-// metadataMap.put("difficulty", q.getDifficulty());
-Metadata metadata = Metadata.from(metadataMap);
+@Service
+public class QuestionVectorSyncService {
+
+    @Resource
+    private QuestionService questionService;
+
+    @Resource(name = "questionEmbeddingStore")
+    private MilvusEmbeddingStore questionEmbeddingStore;
+
+    @Resource
+    private EmbeddingModel embeddingModel;
+
+    public int rebuildQuestionVectors() {
+        List<Question> questions = questionService.list(new QueryWrapper<Question>()
+                .eq("isDelete", 0));
+
+        // 使用独立题目 collection，可安全全量重建，不影响知识点向量
+        questionEmbeddingStore.removeAll();
+
+        int success = 0;
+        for (Question q : questions) {
+            String text = String.format("题目标题：%s\n题干：%s\n考点标签：%s",
+                    q.getTitle(), q.getContent(), q.getTags());
+
+            Map<String, Object> metadataMap = new HashMap<>();
+            metadataMap.put("question_id", q.getId());
+            metadataMap.put("content_type", "题目");
+            metadataMap.put("tag", q.getTags());
+            metadataMap.put("difficulty", q.getDifficulty());
+
+            Metadata metadata = Metadata.from(metadataMap);
+            Embedding embedding = embeddingModel.embed(text).content();
+            questionEmbeddingStore.add(embedding, TextSegment.from(text, metadata));
+            success++;
+        }
+        return success;
+    }
+}
 ```
 
 **算法类型推断辅助方法**：
@@ -645,31 +681,34 @@ private String inferAlgorithmType(String tagText) {
 }
 ```
 
-**在 `retrieveByType` 中按 difficulty 额外过滤（可选）**：
+**题目相似检索按 difficulty 过滤（已落地）**：
 ```java
 /**
- * 支持难度过滤的检索方法（新增重载，向后兼容）
- * 典型用途：错题分析时只检索相同难度的错题分析案例
+ * 支持难度过滤的相似题检索重载
+ * 典型用途：错题分析时优先推荐同难度题目
  */
-public String retrieveByTypeAndDifficulty(String query, String contentTypes,
-                                           String difficulty, int topK, double minScore) {
-    Embedding queryEmbedding = embeddingModel.embed(query).content();
-    List<String> typeList = Arrays.asList(contentTypes.split(","));
-    List<EmbeddingMatch<TextSegment>> matches = embeddingStore.search(
+public List<Long> retrieveSimilarQuestions(Long questionId,
+                                           String questionContent,
+                                           String difficulty) {
+    String normalizedDifficulty = normalizeDifficulty(difficulty);
+    Embedding queryEmbedding = embeddingModel.embed(questionContent).content();
+    return questionEmbeddingStore.search(
             EmbeddingSearchRequest.builder()
                     .queryEmbedding(queryEmbedding)
-                    .maxResults(topK * 2)
-                    .minScore(minScore)
-                    .build()).matches();
-    String context = matches.stream()
+                    .maxResults(8)
+                    .minScore(0.75)
+                    .build())
+            .matches()
+            .stream()
             .filter(m -> m.embedded() != null)
-            .filter(m -> typeList.contains(m.embedded().metadata().getString("content_type")))
-            .filter(m -> difficulty == null ||
-                    difficulty.equals(m.embedded().metadata().getString("difficulty")))
-            .limit(topK)
-            .map(m -> m.embedded().text())
-            .collect(Collectors.joining("\n\n"));
-    return context.isBlank() ? "无相关知识点" : context;
+            .filter(m -> "题目".equals(m.embedded().metadata().getString("content_type")))
+            .filter(m -> normalizedDifficulty == null ||
+                    normalizedDifficulty.equals(normalizeDifficulty(
+                            m.embedded().metadata().getString("difficulty"))))
+            .map(m -> m.embedded().metadata().getLong("question_id"))
+            .filter(id -> id != null && !id.equals(questionId))
+            .limit(4)
+            .collect(Collectors.toList());
 }
 ```
 
@@ -677,11 +716,12 @@ public String retrieveByTypeAndDifficulty(String query, String contentTypes,
 
 #### 5.1.1.3 RAG 优化方向三：相似题推荐 tag 前置过滤
 
-> **当前项目落地状态（2026-04-20）**
-> - 当前实现为 `retrieveSimilarQuestions(Long questionId, String questionContent)`，仅做向量相似度召回与自身题目排除；
+> **当前项目落地状态（2026-04-22）**
+> - 当前实现已升级为 `retrieveSimilarQuestions(Long questionId, String questionContent, String difficulty)`，支持同难度优先召回；
 > - 文档中的 `retrieveSimilarQuestionByTag(...)`（tag 前置过滤）及 `AiQuestionParseService` 对接尚未在仓库落地；
-> - 该优化属于“待实现增强项”，建议按“tag 粗筛 + 向量精排”两阶段补齐。
-> **问题**：当前 `retrieveSimilarQuestion` 直接对全库进行向量检索，语义相似但考点完全不同的题目（如「动态规划题」与「字符串题」）可能因表述相似而被误召回。
+> - 当前题目相似检索已使用独立的 `oj_question` collection，不再与知识点/错题分析向量混检；
+> - tag 前置过滤仍属于“待实现增强项”，建议按“tag 粗筛 + 向量精排”两阶段继续补齐。
+> **问题**：即使已有 difficulty 过滤，如果仍直接做全量题目向量召回，语义相似但考点完全不同的题目（如「动态规划题」与「字符串题」）仍可能被误召回。
 >
 > **优化**：先按 tag 交集筛选候选集，再做向量排序，相当于「粗筛 + 精排」两阶段策略，不引入任何新依赖。
 
@@ -740,10 +780,10 @@ public List<Long> getSimilarQuestions(QuestionVO question) {
 
 #### 5.1.1.4 RAG 优化方向四：检索结果 Redis 缓存（TTL 1小时）
 
-> **当前项目落地状态（2026-04-20）**
-> - 已落地：`retrieve(...)` 入口 Redis 缓存（Key=MD5(query|topK|minScore)，TTL=60分钟）；
+> **当前项目落地状态（2026-04-22）**
+> - 已落地：`retrieve(...)`、`retrieveByType(...)`、`retrieveSimilarQuestions(...)` 三条公开检索链路均已接入 Redis 缓存；
 > - 代码口径：当前项目使用 `TimeUtil.minutes(RAG_CACHE_TTL_MINUTES)` 设置过期时间；
-> - 待补齐：`retrieveByType(...)`、`retrieveSimilarQuestions(...)` 的同构缓存，以及 `clearRagCache()` 管理入口。
+> - 已落地：`clearRagCache()` 管理入口，并在题目向量全量重建后主动清缓存。
 > **问题**：同一道题目被不同用户反复触发 AI 解析时，`OJKnowledgeRetriever` 每次都需要调用 Embedding 模型生成向量、再请求 Milvus 检索，产生额外 API 费用与 RT 延迟。对于同一 query 字符串，检索结果在知识库未更新时完全幂等，完全可以缓存复用。
 >
 > **方案**：在 `retrieve`、`retrieveByType`、`retrieveSimilarQuestionByTag` 三个方法入口处，用 `query + contentTypes + topK` 拼接缓存 Key，先查 Redis，命中则直接返回；未命中时正常走 Embedding + Milvus，结果写入 Redis（TTL = 1小时）。利用现有 `StringRedisTemplate`，**零新增依赖**。
@@ -1250,12 +1290,31 @@ public class AiAgentFactory {
     /**
      * 5.2/5.5 无状态流式服务：只有 StreamingChatModel，无记忆无 RAG
      * Prompt 由 Service 层手动拼装（含 RAG 检索结果）后整体传入
+     * 当前仓库为了兼容 langchain4j 1.0.0-beta3 已验证存在的方法，
+     * 直接使用 StreamingChatLanguageModel.chat(String, StreamingChatResponseHandler)
+     * 手动桥接为 Flux<String>，不依赖额外的 Reactor 适配器。
      */
     @Bean
     public OJStreamingService ojStreamingService(StreamingChatModel streamingChatModel) {
-        return AiServices.builder(OJStreamingService.class)
-                .streamingChatLanguageModel(streamingChatModel)
-                .build();
+        return fullPrompt -> Flux.create(sink -> streamingChatModel.chat(
+                fullPrompt,
+                new StreamingChatResponseHandler() {
+                    @Override
+                    public void onPartialResponse(String partialResponse) {
+                        sink.next(partialResponse == null ? "" : partialResponse);
+                    }
+
+                    @Override
+                    public void onCompleteResponse(ChatResponse chatResponse) {
+                        sink.complete();
+                    }
+
+                    @Override
+                    public void onError(Throwable error) {
+                        sink.error(error);
+                    }
+                }
+        ));
     }
 
     /**
@@ -1657,6 +1716,9 @@ public class AiWrongQuestion implements Serializable {
     @TableField("wrong_code")
     private String wrongCode;
 
+    /** 错题记录对应的代码语言（java / python / cpp 等） */
+    private String language;
+
     /** 错误判题结果（非 Accepted 的状态文本，如 Wrong Answer） */
     @TableField("wrong_judge_result")
     private String wrongJudgeResult;
@@ -1865,15 +1927,94 @@ private String answer;
 
 /**
  * 题目难度（easy / medium / hard）
- * 注意：当前 question 表无 difficulty 列，此字段默认为 null。
- * 后续在 question 表新增 difficulty varchar(16) 列并在 Question 实体添加对应字段后自动生效。
  */
 private String difficulty;
 ```
 
 > **说明**：
 > - `answer` 字段：`Question` 实体已有 `answer` 字段，在 `QuestionVO` 中添加后，`objToVo()` 里的 `BeanUtils.copyProperties(question, questionVO)` 会自动完成赋值，无需修改 `objToVo()` 方法。
-> - `difficulty` 字段：当前 `question` 表无此列，`BeanUtils.copyProperties` 无法从 `Question` 实体赋值，字段始终为 `null`。`OJTools.queryQuestionInfo()` 的难度输出将显示 `null`，不影响其他功能。
+> - `difficulty` 字段：当前已在 `question` 表与 `Question` 实体中落地，`BeanUtils.copyProperties` 会自动完成赋值，`OJTools.queryQuestionInfo()` 与 AI 错题分析都可以直接读取。
+
+**⑨.1 题目管理接口——补齐 `difficulty` 入参、校验与筛选**
+
+本块是把数据库中的 `question.difficulty` 真正接到现有题目管理链路中，避免“表里有字段，但新增 / 编辑 / 查询接口用不到”的断链问题。
+
+需要修改的文件如下：
+
+1. `src/main/java/com/XI/xi_oj/model/dto/question/QuestionAddRequest.java`
+2. `src/main/java/com/XI/xi_oj/model/dto/question/QuestionEditRequest.java`
+3. `src/main/java/com/XI/xi_oj/model/dto/question/QuestionUpdateRequest.java`
+4. `src/main/java/com/XI/xi_oj/model/dto/question/QuestionQueryRequest.java`
+5. `src/main/java/com/XI/xi_oj/model/enums/QuestionDifficultyEnum.java`
+6. `src/main/java/com/XI/xi_oj/service/impl/QuestionServiceImpl.java`
+
+`QuestionAddRequest / QuestionEditRequest / QuestionUpdateRequest` 中新增：
+
+```java
+/**
+ * 题目难度（easy / medium / hard）
+ */
+private String difficulty;
+```
+
+`QuestionQueryRequest` 中同样新增：
+
+```java
+/**
+ * 题目难度（easy / medium / hard）
+ */
+private String difficulty;
+```
+
+新增枚举 `QuestionDifficultyEnum`：
+
+```java
+public enum QuestionDifficultyEnum {
+
+    EASY("easy", "easy"),
+    MEDIUM("medium", "medium"),
+    HARD("hard", "hard");
+}
+```
+
+在 `QuestionServiceImpl.validQuestion(...)` 中补充难度校验：
+
+```java
+if (StringUtils.isNotBlank(difficulty)) {
+    String normalizedDifficulty = difficulty.trim().toLowerCase(Locale.ROOT);
+    if (QuestionDifficultyEnum.getEnumByValue(normalizedDifficulty) == null) {
+        throw new BusinessException(ErrorCode.PARAMS_ERROR, "题目难度不合法，只能为 easy / medium / hard");
+    }
+    question.setDifficulty(normalizedDifficulty);
+}
+```
+
+这样做的目的有两个：
+
+1. 统一把前端传入的 `Easy / EASY / easy` 归一化成数据库里的标准值；
+2. 避免后续 AI 错题分析、题库筛选、向量 metadata 写入时出现脏值。
+
+在 `QuestionServiceImpl.getQueryWrapper(...)` 中补充难度过滤：
+
+```java
+if (StringUtils.isNotBlank(difficulty)) {
+    queryWrapper.eq("difficulty", difficulty.trim().toLowerCase(Locale.ROOT));
+}
+```
+
+这里不需要额外修改 `QuestionController`，原因是：
+
+1. `add / update / edit` 三个接口本身已经使用 `BeanUtils.copyProperties(request, question)`；
+2. 只要 DTO 中补进 `difficulty` 字段，它就会自动复制到 `Question` 实体；
+3. 真正的合法性校验与格式归一化统一收口在 `QuestionServiceImpl.validQuestion(...)`，避免 Controller 分散校验逻辑。
+
+> **实现顺序建议**：
+> 1. 先补四个 DTO 的 `difficulty` 字段；
+> 2. 再新增 `QuestionDifficultyEnum`；
+> 3. 然后补 `QuestionServiceImpl.validQuestion(...)` 的合法性校验；
+> 4. 最后补 `getQueryWrapper(...)` 的按难度筛选。
+>
+> 这样可以保证新增 / 编辑 / 查询三条链路同时闭环，不会出现“前端能传、数据库也有字段，但服务层没校验”或“详情页能展示，列表页却无法筛选”的半接入状态。
 
 ---
 
@@ -2070,6 +2211,99 @@ public class AiCodeAnalysisService {
         // Step 3：直接调用 ChatModel，无状态单次输出
         return chatModel.chat(prompt);
     }
+}
+```
+
+**当前仓库落地状态（2026-04-22）**：
+- 已落地 `AiCodeAnalysisController`，对外提供阻塞式分析、SSE 流式分析、历史查询三个接口；
+- 已落地 `AiCodeAnalysisService` / `AiCodeAnalysisServiceImpl`；
+- 已落地 `AiCodeAnalysis` 实体与 `AiCodeAnalysisMapper`，分析结果会写入 `ai_code_analysis` 表；
+- 已接入 `ai.prompt.code_analysis` 动态 Prompt 配置、`AI_CODE_USER_DAY` 每日限流、`OJKnowledgeRetriever.retrieveByType(...)` 手动 RAG；
+- 代码分析链路不触发沙箱，只读取已有判题结果（可从 `questionSubmitId` 回填上下文）。
+
+**当前接口设计**：
+| 接口地址 | 请求方式 | 说明 |
+|---------|---------|------|
+| `/ai/code/analysis` | POST | 阻塞式代码分析，返回完整文本 |
+| `/ai/code/analysis/stream` | GET | SSE 流式代码分析（要求传 `questionId + questionSubmitId`） |
+| `/ai/code/history` | GET | 查询当前登录用户的代码分析历史 |
+
+**`AiCodeAnalysisRequest` 入参口径**：
+1. 必填：`questionId`
+2. 推荐：传 `questionSubmitId`（从历史提交自动回填 `code/language/judgeStatus/errorMsg`）
+3. 若不传 `questionSubmitId`，则必须自行传 `code + language`，`judgeStatus/errorMsg` 可选
+
+**实现依赖关系与推荐顺序**：
+1. 先确保 4.2.3 `ai_code_analysis` 表已执行；
+2. 新增 `AiCodeAnalysis` 实体与 `AiCodeAnalysisMapper`；
+3. 实现 `AiCodeAnalysisServiceImpl`（串联 `QuestionService + QuestionSubmitService + OJKnowledgeRetriever + ChatModel/OJStreamingService + AiConfigService`）；
+4. 最后实现 `AiCodeAnalysisController`，挂接登录态、限流、SSE 输出协议。
+
+**当前 Service 核心逻辑**：
+```java
+@Service
+public class AiCodeAnalysisServiceImpl implements AiCodeAnalysisService {
+
+    @Resource
+    private ChatLanguageModel chatModel;
+    @Resource
+    private OJStreamingService ojStreamingService;
+    @Resource
+    private OJKnowledgeRetriever ojKnowledgeRetriever;
+    @Resource
+    private QuestionService questionService;
+    @Resource
+    private QuestionSubmitService questionSubmitService;
+    @Resource
+    private AiConfigService aiConfigService;
+    @Resource
+    private AiCodeAnalysisMapper aiCodeAnalysisMapper;
+
+    @Override
+    public String analyzeCode(Long userId, AiCodeAnalysisRequest request) {
+        CodeAnalysisContext context = buildContext(userId, request);
+        String prompt = buildPrompt(context);
+        String analysis = chatModel.chat(prompt);
+        saveAnalysis(context, analysis);
+        return analysis;
+    }
+
+    @Override
+    public Flux<String> analyzeCodeStream(Long userId, Long questionId, Long questionSubmitId) {
+        AiCodeAnalysisRequest request = new AiCodeAnalysisRequest();
+        request.setQuestionId(questionId);
+        request.setQuestionSubmitId(questionSubmitId);
+        CodeAnalysisContext context = buildContext(userId, request);
+        String prompt = buildPrompt(context);
+        StringBuilder buffer = new StringBuilder();
+        return ojStreamingService.stream(prompt)
+                .doOnNext(buffer::append)
+                .doOnComplete(() -> saveAnalysis(context, buffer.toString()));
+    }
+}
+```
+
+**当前 Controller 挂接方式**：
+```java
+@RestController
+@RequestMapping("/ai/code")
+public class AiCodeAnalysisController {
+
+    @RateLimit(types = {AI_USER_MINUTE, AI_IP_MINUTE, AI_CODE_USER_DAY})
+    @PostMapping("/analysis")
+    public BaseResponse<String> analyzeCode(@RequestBody @Valid AiCodeAnalysisRequest request,
+                                            HttpServletRequest httpRequest) { ... }
+
+    @RateLimit(types = {AI_USER_MINUTE, AI_IP_MINUTE, AI_CODE_USER_DAY})
+    @GetMapping(value = "/analysis/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<ServerSentEvent<String>> analyzeCodeStream(@RequestParam Long questionId,
+                                                           @RequestParam Long questionSubmitId,
+                                                           HttpServletRequest httpRequest) { ... }
+
+    @GetMapping("/history")
+    public BaseResponse<List<AiCodeAnalysis>> listHistory(@RequestParam(required = false) Long questionId,
+                                                          @RequestParam(defaultValue = "20") Integer pageSize,
+                                                          HttpServletRequest httpRequest) { ... }
 }
 ```
 
@@ -2276,59 +2510,120 @@ POST /ai/chat/clear
 ### 5.4 AI题目解析与相似题推荐模块
 **功能描述**：为题目提供AI自动解析，根据当前题目考点、难度推荐相似题目，帮助用户针对性练习。
 
-**调用模式**：无状态单次调用，使用 `OJQuestionParseAgent`（AiService 无记忆实例），RAG 由框架自动注入。
+**当前仓库落地状态（2026-04-22）**：
+- 已落地 `AiAgentFactory.ojQuestionParseAgent(...)` Bean；
+- 已落地 `AiQuestionParseService` / `AiQuestionParseServiceImpl`；
+- 已落地 `AiQuestionParseController`，对外提供阻塞式解析、SSE 流式解析、相似题检索三个接口；
+- 已接入 `ai.prompt.question_parse` 动态 Prompt 配置（`AiConfigService.getPrompt()` 内置乱码检测，异常配置自动回退默认模板）、`AI_QUESTION_USER_DAY` 每日限流、`OJKnowledgeRetriever.retrieveSimilarQuestions(...)` 难度过滤相似题推荐。
 
-**核心流程**：
-1. 用户进入题目详情页，将题目信息拼装为 `@UserMessage` 传入 `OJQuestionParseAgent`；
-2. 框架自动触发 RAG 检索题解、知识点类内容，拼入上下文后调用大模型；
-3. Agent 生成结构化的题目解析，包括考点分析、解题思路、易错点提醒；
-4. 通过 `OJKnowledgeRetriever.retrieveSimilarQuestion()` 单独检索相似题目ID，前端拼接跳转链接。
+**调用模式**：5.4 采用“无状态 Agent + 单独向量检索”的双链路设计。
+1. 题目解析正文：走 `OJQuestionParseAgent`，AiService 无记忆，RAG 由框架自动注入；
+2. 相似题推荐：走 `OJKnowledgeRetriever.retrieveSimilarQuestions(...)`，不调用大模型，直接返回题目 ID 列表；
+3. 流式输出：直接调用 `OJQuestionParseAgent.parseStream(...)`，由 `AiQuestionParseController` 统一包装为 SSE JSON 事件。
 
-**核心Prompt模板**：
+**实现依赖关系与推荐顺序**：
+1. 先完成 5.1 `AiAgentFactory.ojQuestionParseAgent(...)`，否则 Service 层没有可注入的 Agent Bean；
+2. 再完成 5.10 的知识库导入 / 题目向量同步，否则 5.4 的 RAG 检索与相似题推荐拿不到有效上下文；
+3. 之后实现 `AiQuestionParseServiceImpl`，负责串联 `QuestionService + AiConfigService + OJQuestionParseAgent + OJKnowledgeRetriever`；
+4. 最后实现 `AiQuestionParseController`，挂接登录态、限流、SSE 输出协议。
+
+**当前接口设计**：
+| 接口地址 | 请求方式 | 说明 |
+|---------|---------|------|
+| `/ai/question/parse` | POST | 阻塞式返回 AI 题目解析 + 相似题 ID |
+| `/ai/question/parse/stream` | GET | SSE 流式返回 AI 题目解析 |
+| `/ai/question/similar` | GET | 单独获取相似题 ID 列表 |
+
+**核心 Prompt 组装方式**：
+```java
+String prompt = aiConfigService.getPrompt(
+        "ai.prompt.question_parse",
+        DEFAULT_PARSE_PROMPT
+);
+
+String context = prompt + "\n\n" + String.format("""
+        当前题目信息：
+        题目ID：%d
+        标题：%s
+        题干：%s
+        标签：%s
+        难度：%s
+
+        请严格按以下结构输出：
+        1. 考点分析
+        2. 解题思路
+        3. 常见易错点
+        4. 延伸建议
+        """,
+        question.getId(),
+        question.getTitle(),
+        question.getContent(),
+        formatTags(question.getTags()),
+        defaultIfBlank(question.getDifficulty(), "未知")
+);
 ```
-【题目信息】
-题目ID：{{questionId}}
-标题：{{title}}
-题干：{{content}}
-考点：{{tags}}
-难度：{{difficulty}}
 
-请你完成以下结构化解析：
-1. 考点分析：说明本题涉及的算法与数据结构，以及核心考察点；
-2. 解题思路：分步骤引导思考路径，不直接提供可运行的完整代码；
-3. 常见易错点：列出该题型最容易出错的边界条件或逻辑误区；
-4. 延伸建议：推荐该考点适合进一步学习的方向。
-回答格式结构清晰，语言通俗，适配编程初学者。
-```
-
-**Service 层调用示例**：
+**当前 Service 层核心逻辑**：
 ```java
 @Service
-public class AiQuestionParseService {
+public class AiQuestionParseServiceImpl implements AiQuestionParseService {
 
-    @Autowired
-    private OJQuestionParseAgent ojQuestionParseAgent;  // 注入无记忆 AiService 实例
-    @Autowired
+    @Resource
+    private OJQuestionParseAgent ojQuestionParseAgent;
+    @Resource
     private OJKnowledgeRetriever ojKnowledgeRetriever;
+    @Resource
+    private QuestionService questionService;
+    @Resource
+    private AiConfigService aiConfigService;
 
-    public String parseQuestion(QuestionVO question) {
-        // RAG 由 AiService 框架自动注入，此处只需传入题目上下文
-        String context = String.format("""
-                题目ID：%d  标题：%s
-                题干：%s
-                考点：%s  难度：%s
-                """,
-                question.getId(), question.getTitle(),
-                question.getContent(), question.getTags(), question.getDifficulty());
-
-        return ojQuestionParseAgent.parse(context);  // 单次无状态调用
+    @Override
+    public AiQuestionParseResponse parseQuestion(Long userId, Long questionId) {
+        Question question = requireQuestion(questionId);
+        String context = buildQuestionContext(question);
+        String analysis = ojQuestionParseAgent.parse(context);
+        List<Long> similarQuestionIds = ojKnowledgeRetriever.retrieveSimilarQuestions(
+                question.getId(),
+                buildSimilarityQuery(question),
+                question.getDifficulty()
+        );
+        return AiQuestionParseResponse.builder()
+                .questionId(questionId)
+                .analysis(analysis)
+                .similarQuestionIds(similarQuestionIds)
+                .build();
     }
 
-    public List<Long> getSimilarQuestions(QuestionVO question) {
-        // 相似题推荐单独调用向量检索，不走 LLM
-        return ojKnowledgeRetriever.retrieveSimilarQuestion(
-                question.getId(), question.getContent()
+    @Override
+    public Flux<String> parseQuestionStream(Long userId, Long questionId) {
+        Question question = requireQuestion(questionId);
+        return ojQuestionParseAgent.parseStream(buildQuestionContext(question));
+    }
+}
+```
+
+**Controller 层挂接方式**：
+```java
+@RestController
+@RequestMapping("/ai/question")
+public class AiQuestionParseController {
+
+    @RateLimit(types = {AI_USER_MINUTE, AI_IP_MINUTE, AI_QUESTION_USER_DAY})
+    @PostMapping("/parse")
+    public BaseResponse<AiQuestionParseResponse> parseQuestion(
+            @RequestBody @Valid AiQuestionParseRequest request,
+            HttpServletRequest httpRequest) {
+        User loginUser = userService.getLoginUser(httpRequest);
+        return ResultUtils.success(
+                aiQuestionParseService.parseQuestion(loginUser.getId(), request.getQuestionId())
         );
+    }
+
+    @RateLimit(types = {AI_USER_MINUTE, AI_IP_MINUTE, AI_QUESTION_USER_DAY})
+    @GetMapping(value = "/parse/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<ServerSentEvent<String>> parseQuestionStream(@RequestParam Long questionId,
+                                                             HttpServletRequest httpRequest) {
+        ...
     }
 }
 ```
@@ -2336,223 +2631,115 @@ public class AiQuestionParseService {
 ### 5.5 AI错题本模块
 **功能描述**：自动收集用户错题，AI分析错误原因，生成针对性的复习计划与同类题目推荐，帮助用户查漏补缺，巩固知识点。
 
-**调用模式**：无状态单次调用，直接注入共享 `ChatModel`，RAG 检索由 Service 层手动执行后注入 Prompt（与 5.2 相同模式）。
+**当前仓库落地状态（2026-04-22）**：
+- 已实现：错题自动收集、错题列表、阻塞式 AI 分析、SSE 流式 AI 分析、标记已复习；
+- 已接入：原判题链路 `JudgeServiceImpl`，判题完成后自动调用 `WrongQuestionCollector`；
+- 暂未实现：定时复习提醒、按考点/难度/错误类型筛选。
 
-> **沙箱调用说明**：5.5 错题分析**不主动调用代码沙箱**。错题本收集的是"已经判题失败的记录"，沙箱在正常提交流程中已执行完毕，判题结果已落库。AI 只分析已有的错误结果，不重新执行代码。重新测试代码的需求走 Agent 的 `judgeUserCode` 工具（见 5.1.3）。
+**调用模式**：5.5 采用“手动 RAG + 共享模型”的无状态方案。
+- 非流式：`AiWrongQuestionServiceImpl.analyzeWrongQuestion()` 直接注入 `ChatLanguageModel`；
+- 流式：`AiWrongQuestionServiceImpl.analyzeWrongQuestionStream()` 调用 `OJStreamingService`；
+- 其中 `OJStreamingService` 在当前项目里不是 `AiServices + Flux` 自动适配，而是直接基于 `StreamingChatLanguageModel.chat(String, StreamingChatResponseHandler)` 手动桥接成 `Flux<String>`，这样可以确保只使用当前 `langchain4j 1.0.0-beta3` 已验证存在的方法。
 
-**核心流程**：
-1. **错题自动收集**：用户提交代码判题失败（WA/TLE/RE等）后，系统自动将「题目ID、用户ID、错误代码、判题结果」存入`ai_wrong_question`表；
-2. **AI错误分析**：Service 层手动调用 `OJKnowledgeRetriever.retrieveByType()` 检索「错题分析」类知识点，将结果与题目信息、错误代码拼装为完整 Prompt，直接调用 `ChatModel`；
-3. **复习计划生成**：Agent根据用户的错误类型、题目难度、考点，结合艾宾浩斯遗忘曲线，生成个性化的复习计划，包括下次复习时间、复习重点；
-4. **同类题目推荐**：通过RAG检索与当前错题考点、难度、错误类型相似的3-4道题，存入`similar_questions`字段；
-5. **复习提醒与记录**：用户完成复习后，更新`is_reviewed`、`review_count`、`next_review_time`字段，系统根据`next_review_time`推送复习提醒。
+> **沙箱调用说明**：5.5 错题分析**不主动调用代码沙箱**。错题本分析的是“已有判题失败结果”，沙箱已经在正常提交时执行完毕。若用户要在对话中临时测试代码，仍走 `OJTools.judgeUserCode` 工具（见 5.1.3）。
 
-**核心Prompt模板**：
-```
-【当前错题信息】
-题目ID：{{questionId}}
-标题：{{title}}
-题干：{{content}}
-考点：{{tags}}
-难度：{{difficulty}}
+#### 5.5.1 实现依赖关系与推荐顺序
 
-【用户错误代码】
-语言：{{language}}
-代码内容：
-{{wrongCode}}
+本模块与前文、后文代码存在明确依赖，建议按如下顺序实现：
 
-【错误判题结果】
-状态：{{judgeStatus}}
-错误信息：{{errorMsg}}
+1. 先执行 SQL：`ai_wrong_question` 表必须存在，同时 `question_submit.source` 字段也必须存在，否则无法区分普通提交与 AI 工具测试提交；
+2. 先实现数据模型：`AiWrongQuestion` 实体、`AiWrongQuestionMapper` 查询方法；
+3. 再实现 OJTools 依赖的只读服务：`WrongQuestionService` + `WrongQuestionVO`，因为 `OJTools.queryUserWrongQuestion()` 依赖它；
+4. 再实现 5.5 业务层：`WrongQuestionContext`、`WrongQuestionReviewRequest`、`AiWrongQuestionService`、`AiWrongQuestionServiceImpl`；
+5. 再实现判题埋点：`WrongQuestionCollector`，并注入 `JudgeServiceImpl`，否则错题表不会自动产生数据；
+6. 最后实现 `AiWrongQuestionController`，因为 Controller 只是业务层的外部入口。
 
-【RAG检索的典型错误分析】
-{{typicalWrongAnalysis}}
+**当前仓库对应文件**：
+- `src/main/java/com/XI/xi_oj/model/entity/AiWrongQuestion.java`
+- `src/main/java/com/XI/xi_oj/mapper/AiWrongQuestionMapper.java`
+- `src/main/java/com/XI/xi_oj/model/dto/question/WrongQuestionContext.java`
+- `src/main/java/com/XI/xi_oj/model/dto/question/WrongQuestionReviewRequest.java`
+- `src/main/java/com/XI/xi_oj/service/WrongQuestionService.java`
+- `src/main/java/com/XI/xi_oj/service/impl/WrongQuestionServiceImpl.java`
+- `src/main/java/com/XI/xi_oj/service/AiWrongQuestionService.java`
+- `src/main/java/com/XI/xi_oj/service/impl/AiWrongQuestionServiceImpl.java`
+- `src/main/java/com/XI/xi_oj/service/impl/WrongQuestionCollector.java`
+- `src/main/java/com/XI/xi_oj/controller/AiWrongQuestionController.java`
+- `src/main/java/com/XI/xi_oj/judge/JudgeServiceImpl.java`
 
-请你完成以下任务：
-1. 详细分析用户代码的错误原因，指出具体的逻辑漏洞、语法错误或边界问题；
-2. 给出清晰的修正思路，引导用户自己修改代码，不直接提供完整正确代码；
-3. 结合艾宾浩斯遗忘曲线，生成一个简单的复习计划，包括：
-   - 本次复习重点
-   - 下次复习时间（建议：首次复习在1天后，第二次在3天后，第三次在7天后）
-4. 结合题目考点，推荐3道同类巩固练习题，只需要题目ID和标题。
-回答格式清晰，分点说明，语言通俗易懂，鼓励用户自主思考。
-```
+#### 5.5.2 当前接口口径（以真实代码为准）
 
-**`WrongQuestionContext.java`（Service 层入参 DTO，字段完整定义）**：
-```java
-/**
- * 错题分析上下文 DTO
- * 由 Controller 层组装后传入 AiWrongQuestionService.analyzeWrongQuestion()
- */
-@Data
-@Builder
-@NoArgsConstructor
-@AllArgsConstructor
-public class WrongQuestionContext {
-    /** 错题本记录ID（ai_wrong_question.id，用于更新分析结果） */
-    private Long wrongQuestionId;
-    /** 题目ID */
-    private Long questionId;
-    /** 题目标题 */
-    private String title;
-    /** 题目内容（题干） */
-    private String content;
-    /** 考点标签（逗号分隔） */
-    private String tags;
-    /** 题目难度 */
-    private String difficulty;
-    /** 用户提交的错误代码 */
-    private String wrongCode;
-    /** 代码语言 */
-    private String language;
-    /** 错误判题结果（Wrong Answer / Time Limit Exceeded / Runtime Error 等） */
-    private String wrongJudgeResult;
-    /** 判题详细错误信息 */
-    private String errorMsg;
-    /** 当前登录用户ID */
-    private Long userId;
-}
-```
+| 接口 | 方式 | 说明 |
+|------|------|------|
+| `/ai/wrong-question/list` | GET | 获取当前登录用户的错题列表 |
+| `/ai/wrong-question/analysis` | GET | 阻塞式错题分析 |
+| `/ai/wrong-question/analysis/stream` | GET | SSE 流式错题分析 |
+| `/ai/wrong-question/review` | POST | 标记已复习，并推进下次复习时间 |
 
-**Service 层调用示例（手动 RAG）**：
-```java
-@Service
-public class AiWrongQuestionService {
+**Controller 入参 DTO**：
+- `WrongQuestionReviewRequest`：只包含 `wrongQuestionId`；
+- `WrongQuestionContext`：仅在 Service 内部组装，不直接暴露给前端。
 
-    @Autowired
-    private ChatModel chatModel;                       // 注入工厂创建的共享 ChatModel
-    @Autowired
-    private OJKnowledgeRetriever ojKnowledgeRetriever; // 手动 RAG
+#### 5.5.3 数据字段口径与当前限制
 
-    public String analyzeWrongQuestion(WrongQuestionContext ctx) {
-        // Step 1：手动 RAG 检索，只取「错题分析」类知识点，精准避免噪声
-        String ragContext = ojKnowledgeRetriever.retrieveByType(
-                ctx.getTitle() + " " + ctx.getTags() + " " + ctx.getWrongJudgeResult(),
-                "错题分析",
-                3, 0.7
-        );
+当前这两个字段已经正式字段化：
 
-        // Step 2：拼装完整 Prompt，RAG 结果作为独立段落注入
-        String prompt = String.format("""
-                【当前错题信息】
-                题目ID：%d  标题：%s  题干：%s  考点：%s  难度：%s
-                【用户错误代码】
-                语言：%s
-                %s
-                【错误判题结果】
-                状态：%s  错误信息：%s
-                【RAG检索的典型错误分析】
-                %s
-                请完成：错误原因分析、修正思路、复习计划、同类题目推荐。
-                """,
-                ctx.getQuestionId(), ctx.getTitle(), ctx.getContent(),
-                ctx.getTags(), ctx.getDifficulty(),
-                ctx.getLanguage(), ctx.getWrongCode(),
-                ctx.getWrongJudgeResult(), ctx.getErrorMsg(),
-                ragContext   // ← RAG 结果注入
-        );
+1. `question.difficulty`：供题目详情、OJTools 查题、AI 错题分析、后续按难度筛题共用；
+2. `ai_wrong_question.language`：记录当次错误提交使用的语言，供错题分析 Prompt 直接读取。
 
-        // Step 3：直接调用 ChatModel，无状态单次输出
-        return chatModel.chat(prompt);
-    }
-}
-```
+当前实现口径：
 
-#### 5.5.1 错题自动收集触发点
+1. `AiWrongQuestionServiceImpl.buildContext()` 优先读取数据库中的真实值；
+2. 仅当历史旧数据尚未回填时，才对空值兜底显示 `"未知"`；
+3. 新写入的错题记录会由 `WrongQuestionCollector.collect(...)` 同步落库 `language`。
 
-> **关键说明**：错题收集必须在原有判题结果处理逻辑中埋点，不能由用户手动触发。在现有 `JudgeService` 或判题结果回调处添加如下逻辑。
+#### 5.5.4 错题自动收集触发点
 
-**`WrongQuestionCollector.java`（独立 Component，方便注入任意位置）**：
-```java
-/**
- * 错题自动收集器
- * 调用位置：JudgeService 判题完成后、判题结果消费者（MQ消费端）均可注入调用
- */
-@Component
-@Slf4j
-public class WrongQuestionCollector {
+`WrongQuestionCollector` 必须在判题完成处埋点，不能靠用户手动“加入错题本”。当前仓库已经接入到 `JudgeServiceImpl`。
 
-    @Autowired
-    private AiWrongQuestionMapper wrongQuestionMapper;
+当前实现规则如下：
 
-    /**
-     * 判题结果回调入口（非 AC 结果自动入错题本）
-     * 幂等处理：同一用户同一题已有记录则更新（清空旧分析），否则新建
-     *
-     * @param userId      提交用户ID
-     * @param questionId  题目ID
-     * @param code        用户提交代码
-     * @param language    代码语言
-     * @param judgeResult 判题结果 DTO
-     */
-    public void collect(Long userId, Long questionId, String code,
-                        String language, JudgeResultDTO judgeResult) {
-        String status = judgeResult.getStatus();
-        // AC 不收入错题本
-        if ("Accepted".equalsIgnoreCase(status)) {
-            return;
-        }
-        try {
-            AiWrongQuestion existing = wrongQuestionMapper.selectByUserAndQuestion(userId, questionId);
-            if (existing != null) {
-                // 更新：清空旧分析，重置复习状态，准备重新分析
-                existing.setWrongCode(code);
-                existing.setWrongJudgeResult(status);
-                existing.setWrongAnalysis(null);
-                existing.setReviewPlan(null);
-                existing.setIsReviewed(0);
-                wrongQuestionMapper.updateById(existing);
-                log.info("[错题收集] 更新错题记录 userId={} questionId={} status={}", userId, questionId, status);
-            } else {
-                // 新增
-                AiWrongQuestion wrong = new AiWrongQuestion();
-                wrong.setUserId(userId);
-                wrong.setQuestionId(questionId);
-                wrong.setWrongCode(code);
-                wrong.setWrongJudgeResult(status);
-                wrongQuestionMapper.insert(wrong);
-                log.info("[错题收集] 新增错题记录 userId={} questionId={} status={}", userId, questionId, status);
-            }
-        } catch (Exception e) {
-            // 错题收集失败不影响主判题流程
-            log.error("[错题收集] 写库失败 userId={} questionId={}: {}", userId, questionId, e.getMessage());
-        }
-    }
-}
-```
+- `source = ai_tool` 的测试性提交**不入错题本**，避免污染用户学习记录；
+- `Accepted / 成功` **不入错题本**；
+- 同一用户同一题若已有错题记录，则更新而不是重复插入；
+- 更新旧记录时会清空旧分析、旧复习计划、旧相似题和复习状态，确保重新分析得到的是最新结果。
 
-**在现有判题完成处埋点调用（示意）**：
-```java
-// 在 JudgeService 或 RabbitMQ 判题结果消费者中注入并调用
-@Autowired
-private WrongQuestionCollector wrongQuestionCollector;
-
-// 判题完成后：
-JudgeResultDTO result = sandbox.judge(code, language, question);
-// ↓ 新增：错题自动收集（非 AC 时入库，不影响主流程）
-wrongQuestionCollector.collect(userId, questionId, code, language, result);
-```
-
-**`AiWrongQuestionMapper.java`（补充关键查询方法）**：
+**当前 Mapper 最少需要的方法**：
 ```java
 @Mapper
 public interface AiWrongQuestionMapper extends BaseMapper<AiWrongQuestion> {
 
     @Select("SELECT * FROM ai_wrong_question WHERE user_id = #{userId} " +
-            "AND question_id = #{questionId} LIMIT 1")
+            "AND question_id = #{questionId} ORDER BY createTime DESC, id DESC LIMIT 1")
     AiWrongQuestion selectByUserAndQuestion(@Param("userId") Long userId,
-                                             @Param("questionId") Long questionId);
+                                            @Param("questionId") Long questionId);
+
+    @Select("SELECT * FROM ai_wrong_question WHERE id = #{wrongQuestionId} " +
+            "AND user_id = #{userId} LIMIT 1")
+    AiWrongQuestion selectByIdAndUser(@Param("wrongQuestionId") Long wrongQuestionId,
+                                      @Param("userId") Long userId);
+
+    @Select("SELECT * FROM ai_wrong_question WHERE user_id = #{userId} " +
+            "ORDER BY updateTime DESC, id DESC")
+    List<AiWrongQuestion> selectListByUser(@Param("userId") Long userId);
 }
 ```
 
-**核心功能特性**：
-- 错题自动收集，无需用户手动添加（判题非AC结果自动触发）；
-- 幂等处理：同一题重复出错时更新记录，不重复创建；
-- AI多维度错误分析，定位问题根源；
-- 个性化复习计划，科学巩固知识点（艾宾浩斯遗忘曲线：1天/3天/7天复习）；
-- 同类题目推荐，针对性强化练习；
-- 复习进度追踪，提醒用户及时复习；
-- 错题本支持按考点、难度、错误类型筛选。
+#### 5.5.5 Service 层真实职责
+
+`AiWrongQuestionServiceImpl` 当前承担以下职责：
+
+1. 校验错题是否属于当前用户；
+2. 查询题目基础信息，组装 `WrongQuestionContext`；
+3. 手动调用 `OJKnowledgeRetriever.retrieveByType(..., "错题分析", ...)` 检索错题分析知识；
+4. 调用 `OJKnowledgeRetriever.retrieveSimilarQuestions(..., difficulty)` 推荐同难度优先的相似题；
+5. 先读取 `ai.prompt.wrong_analysis`（若缺失或疑似乱码则自动回退默认模板），再拼装 Prompt，调用 `ChatLanguageModel.chat(prompt)` 或 `OJStreamingService.stream(prompt)`；
+6. 将 AI 输出回写到 `wrong_analysis`、`review_plan`、`similar_questions`；
+7. 标记复习时按 1 天 / 3 天 / 7 天节奏推进 `next_review_time`。
+
+**当前已实现，后续可扩展**：
+- 已实现：自动收集、重新分析覆盖旧结果、流式/非流式双模式、基础复习节奏；
+- 后续扩展：按标签筛选、复习提醒定时任务、语言维度分析、错题统计看板。
 
 ### 5.6 系统配置与AI开关模块
 **功能描述**：实现AI功能的全局管控、动态配置，无需重启服务即可修改AI相关参数。
@@ -2781,178 +2968,121 @@ public class UserProfileUpdateRequest {
 ### 5.8 题目评论与互动模块
 **功能描述**：为每道题目新增评论区，支持用户发布评论、回复、点赞，实现用户间的学习交流。
 
-**核心功能**：
-- 题目评论发布、删除、回复；
-- 评论点赞、取消点赞；
-- 评论举报与管理员审核；
-- 热门评论优先展示。
+**当前仓库落地状态（2026-04-22）**：
+- 已实现：评论发布、回复、评论树查询、点赞/取消点赞、逻辑删除；
+- 已实现：根评论按热度排序，回复按创建时间排序；
+- 暂未实现：评论举报、审核流、敏感词过滤、分页加载。
 
-#### 5.8.1 评论区 Service + Controller 实现
+#### 5.8.1 实现依赖关系与推荐顺序
 
-**`CommentVO.java`（评论树节点 VO）**：
+评论区虽然独立于 AI 模块，但也有清晰的实现顺序：
+
+1. 先执行 `question_comment` 建表 SQL；
+2. 再创建实体 `QuestionComment`；
+3. 再创建 Mapper：`QuestionCommentMapper`；
+4. 再创建接口交互模型：`CommentAddRequest`、`CommentLikeRequest`、`CommentDeleteRequest`、`CommentVO`；
+5. 再实现 `QuestionCommentService` 与 `QuestionCommentServiceImpl`；
+6. 最后实现 `QuestionCommentController` 暴露接口。
+
+**当前仓库对应文件**：
+- `src/main/java/com/XI/xi_oj/model/entity/QuestionComment.java`
+- `src/main/java/com/XI/xi_oj/mapper/QuestionCommentMapper.java`
+- `src/main/java/com/XI/xi_oj/model/dto/comment/CommentAddRequest.java`
+- `src/main/java/com/XI/xi_oj/model/dto/comment/CommentLikeRequest.java`
+- `src/main/java/com/XI/xi_oj/model/dto/comment/CommentDeleteRequest.java`
+- `src/main/java/com/XI/xi_oj/model/vo/CommentVO.java`
+- `src/main/java/com/XI/xi_oj/service/QuestionCommentService.java`
+- `src/main/java/com/XI/xi_oj/service/impl/QuestionCommentServiceImpl.java`
+- `src/main/java/com/XI/xi_oj/controller/QuestionCommentController.java`
+
+#### 5.8.2 当前接口口径（以真实代码为准）
+
+| 接口 | 方式 | 说明 |
+|------|------|------|
+| `/comment/add` | POST | 发布评论或回复 |
+| `/comment/list` | GET | 按题目查询评论树 |
+| `/comment/like` | POST | 点赞 / 取消点赞 |
+| `/comment/delete` | POST | 删除评论（作者或管理员） |
+
+#### 5.8.3 当前后端实现要点
+
+**1. `CommentVO` 是评论树节点，不是数据库实体**
+
+`CommentVO` 当前字段口径如下：
+
 ```java
 @Data
-public class CommentVO {
+public class CommentVO implements Serializable {
     private Long id;
     private Long questionId;
     private Long userId;
     private String content;
     private Long parentId;
     private Integer likeNum;
-    private String createTime;
-    /** 子评论（回复列表） */
+    private Date createTime;
     private List<CommentVO> replies = new ArrayList<>();
-
-    public static CommentVO from(QuestionComment c) {
-        CommentVO vo = new CommentVO();
-        vo.setId(c.getId());
-        vo.setQuestionId(c.getQuestionId());
-        vo.setUserId(c.getUserId());
-        vo.setContent(c.getContent());
-        vo.setParentId(c.getParentId());
-        vo.setLikeNum(c.getLikeNum());
-        vo.setCreateTime(c.getCreateTime().toString());
-        return vo;
-    }
 }
 ```
 
-**`QuestionCommentService.java`**：
+这里 `createTime` 在真实代码里是 `Date`，不是字符串。
+
+**2. `QuestionCommentServiceImpl` 负责完整业务校验**
+
+当前 Service 已做以下校验：
+
+- 发表评论前先校验题目是否存在；
+- 回复评论时先校验父评论是否存在，且必须属于同一道题；
+- 删除评论时校验是否为评论作者或管理员；
+- 查询评论树时先平铺全部评论，再组装为树结构。
+
+**3. 点赞逻辑必须以 Redis 返回值为准**
+
+当前仓库的点赞状态通过 Redis Set `comment:like:{commentId}` 维护。实现时不要使用“先 `isMember` 再更新数据库”的方式，否则并发下可能把 `like_num` 加重。
+
+推荐口径如下：
+
 ```java
-@Service
-@Slf4j
-public class QuestionCommentService {
+public boolean toggleLike(Long commentId, Long userId) {
+    String likeKey = "comment:like:" + commentId;
+    String userMember = String.valueOf(userId);
 
-    @Autowired
-    private QuestionCommentMapper commentMapper;
-    @Autowired
-    private StringRedisTemplate redisTemplate;
-
-    /**
-     * 发布评论（parent_id = 0 为根评论，否则为回复）
-     */
-    public Long addComment(Long questionId, Long userId, String content, Long parentId) {
-        QuestionComment comment = new QuestionComment();
-        comment.setQuestionId(questionId);
-        comment.setUserId(userId);
-        comment.setContent(content);
-        comment.setParentId(parentId == null ? 0L : parentId);
-        commentMapper.insert(comment);
-        return comment.getId();
+    Long removed = redisTemplate.opsForSet().remove(likeKey, userMember);
+    if (removed != null && removed > 0) {
+        commentMapper.decrementLike(commentId);
+        return false;
     }
 
-    /**
-     * 获取题目评论树（根评论按点赞数倒序，子评论挂载到父评论下）
-     */
-    public List<CommentVO> getCommentTree(Long questionId) {
-        List<QuestionComment> all = commentMapper.selectByQuestionId(questionId);
-        Map<Long, CommentVO> map = new LinkedHashMap<>();
-        List<CommentVO> roots = new ArrayList<>();
-        for (QuestionComment c : all) {
-            CommentVO vo = CommentVO.from(c);
-            map.put(c.getId(), vo);
-            if (c.getParentId() == 0) roots.add(vo);
-        }
-        for (QuestionComment c : all) {
-            if (c.getParentId() != 0 && map.containsKey(c.getParentId())) {
-                map.get(c.getParentId()).getReplies().add(map.get(c.getId()));
-            }
-        }
-        // 热门评论优先
-        roots.sort(Comparator.comparingInt(CommentVO::getLikeNum).reversed());
-        return roots;
+    Long added = redisTemplate.opsForSet().add(likeKey, userMember);
+    if (added != null && added > 0) {
+        commentMapper.incrementLike(commentId);
     }
-
-    /**
-     * 点赞 / 取消点赞（Redis Set 防重复点赞）
-     * @return true=点赞成功，false=取消点赞
-     */
-    public boolean toggleLike(Long commentId, Long userId) {
-        String likeKey = "comment:like:" + commentId;
-        String userStr = String.valueOf(userId);
-        Boolean liked = redisTemplate.opsForSet().isMember(likeKey, userStr);
-        if (Boolean.TRUE.equals(liked)) {
-            redisTemplate.opsForSet().remove(likeKey, userStr);
-            commentMapper.decrementLike(commentId);
-            return false;
-        } else {
-            redisTemplate.opsForSet().add(likeKey, userStr);
-            commentMapper.incrementLike(commentId);
-            return true;
-        }
-    }
-
-    /**
-     * 删除评论（逻辑删除，仅作者或管理员可操作）
-     */
-    public void deleteComment(Long commentId, Long userId, boolean isAdmin) {
-        QuestionComment comment = commentMapper.selectById(commentId);
-        if (comment == null) throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "评论不存在");
-        if (!isAdmin && !comment.getUserId().equals(userId)) {
-            throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限删除该评论");
-        }
-        comment.setIsDelete(1);
-        commentMapper.updateById(comment);
-    }
+    return true;
 }
 ```
 
-**`QuestionCommentMapper.java`**：
-```java
-@Mapper
-public interface QuestionCommentMapper extends BaseMapper<QuestionComment> {
+**4. 评论排序规则**
 
-    @Select("SELECT * FROM question_comment WHERE question_id = #{questionId} AND is_delete = 0 " +
-            "ORDER BY like_num DESC, createTime ASC")
-    List<QuestionComment> selectByQuestionId(@Param("questionId") Long questionId);
+当前代码的排序规则已经明确：
 
-    @Update("UPDATE question_comment SET like_num = like_num + 1 WHERE id = #{commentId}")
-    void incrementLike(@Param("commentId") Long commentId);
+- 根评论：`like_num DESC, createTime ASC, id ASC`
+- 回复评论：`createTime ASC, id ASC`
 
-    @Update("UPDATE question_comment SET like_num = GREATEST(like_num - 1, 0) WHERE id = #{commentId}")
-    void decrementLike(@Param("commentId") Long commentId);
-}
-```
+因此“热门评论优先展示”当前只针对根评论，回复不走热度排序。
 
-**`QuestionCommentController.java`**：
-```java
-@RestController
-@RequestMapping("/comment")
-public class QuestionCommentController {
+#### 5.8.4 当前能力边界
 
-    @Autowired
-    private QuestionCommentService commentService;
+为避免文档与代码不一致，这里明确当前未落地项：
 
-    @PostMapping("/add")
-    public BaseResponse<Long> addComment(@RequestBody CommentAddRequest request,
-                                          HttpServletRequest httpRequest) {
-        Long userId = UserHolder.getCurrentUserId(httpRequest);
-        return ResultUtils.success(commentService.addComment(
-                request.getQuestionId(), userId, request.getContent(), request.getParentId()));
-    }
+- 评论举报与管理员审核：未实现；
+- 评论敏感词审核：未实现；
+- 评论分页与懒加载：未实现；
+- 评论用户昵称 / 头像联表展示：未实现，当前只返回 `userId`。
 
-    @GetMapping("/list")
-    public BaseResponse<List<CommentVO>> listComments(@RequestParam Long questionId) {
-        return ResultUtils.success(commentService.getCommentTree(questionId));
-    }
+若后续要继续扩展评论区，建议按以下顺序继续追加：
 
-    @PostMapping("/like")
-    public BaseResponse<Boolean> toggleLike(@RequestBody CommentLikeRequest request,
-                                             HttpServletRequest httpRequest) {
-        Long userId = UserHolder.getCurrentUserId(httpRequest);
-        return ResultUtils.success(commentService.toggleLike(request.getCommentId(), userId));
-    }
-
-    @PostMapping("/delete")
-    public BaseResponse<String> deleteComment(@RequestBody CommentDeleteRequest request,
-                                               HttpServletRequest httpRequest) {
-        Long userId = UserHolder.getCurrentUserId(httpRequest);
-        boolean isAdmin = UserHolder.isAdmin(httpRequest);
-        commentService.deleteComment(request.getCommentId(), userId, isAdmin);
-        return ResultUtils.success("删除成功");
-    }
-}
-```
+1. 增加评论举报表与后台审核接口；
+2. 给 `CommentVO` 增加用户展示信息；
+3. 再做分页 / 懒加载 / 楼中楼展示优化。
 
 ### 5.9 AI接口限流模块
 **功能描述**：在现有 `@RateLimit` + Redis 限流体系基础上，扩展 AI 专属限流维度，控制大模型 API 调用成本，防止接口滥用，无需改动现有提交限流逻辑，完全向后兼容。
@@ -3159,20 +3289,34 @@ title: 二分查找-WA-边界处理错误
 
 #### 5.10.2 核心代码实现
 
+**当前仓库落地状态（2026-04-22）**：
+- `KnowledgeInitializer` 已实现，并挂在应用启动链路 `CommandLineRunner`；
+- `KnowledgeImportController` 已实现管理员上传导入接口 `/admin/knowledge/import`；
+- `QuestionVectorSyncService + QuestionVectorSyncJob` 已实现题目向量全量重建与定时同步；
+- 当前项目已拆分双 collection：`oj_knowledge`（知识库）与 `oj_question`（题目向量），二者职责必须分开。
+
+**实现依赖关系与推荐顺序**：
+1. 先在 5.1 `AiAgentFactory` 中创建 `embeddingStore()` 与 `questionEmbeddingStore()` 两个 Bean；
+2. 再实现 `KnowledgeInitializer`，保证 `oj_knowledge` 中先有知识点数据；
+3. 再实现 `QuestionVectorSyncService / Job`，把 MySQL `question` 表同步到 `oj_question`；
+4. 最后由 5.4 / 5.5 模块消费这两类向量数据：题目解析走 `oj_knowledge`，相似题推荐走 `oj_question`。
+
 ```java
 // ─────────────────────────────────────────────
-// 策略一：启动时自动初始化（首次部署从 classpath 加载）
+// 策略一：启动时自动初始化 knowledge collection（首次部署从 classpath 加载）
 // ─────────────────────────────────────────────
 @Component
 @Slf4j
 public class KnowledgeInitializer implements CommandLineRunner {
 
-    @Autowired
+    @Resource
+    @Qualifier("embeddingStore")
     private MilvusEmbeddingStore embeddingStore;
-    @Autowired
+    @Resource
     private EmbeddingModel embeddingModel;
+    @Resource
+    private OJKnowledgeRetriever ojKnowledgeRetriever;
 
-    // 需要初始化导入的知识文件路径（classpath 相对路径）
     private static final String[] KNOWLEDGE_FILES = {
         "knowledge/algorithm_knowledge.md",
         "knowledge/error_analysis.md"
@@ -3180,18 +3324,11 @@ public class KnowledgeInitializer implements CommandLineRunner {
 
     @Override
     public void run(String... args) {
-        // 检查向量库是否已有数据，有则跳过，避免重复导入
-        Embedding probe = embeddingModel.embed("初始化检测").content();
-        List<EmbeddingMatch<TextSegment>> existing = embeddingStore.search(
-                EmbeddingSearchRequest.builder()
-                        .queryEmbedding(probe)
-                        .maxResults(1)
-                        .build()).matches();
-        if (!existing.isEmpty()) {
-            log.info("[知识库] 向量库已有数据，跳过初始化");
+        if (hasKnowledgeData()) {
+            log.info("[Knowledge Init] knowledge collection already has data, skip bootstrap import");
             return;
         }
-        log.info("[知识库] 向量库为空，开始从 classpath 加载知识点数据...");
+        log.info("[Knowledge Init] knowledge collection is empty, start importing classpath markdown files");
         for (String filePath : KNOWLEDGE_FILES) {
             importFromClasspath(filePath);
         }
@@ -3200,110 +3337,157 @@ public class KnowledgeInitializer implements CommandLineRunner {
     private void importFromClasspath(String filePath) {
         try {
             ClassPathResource resource = new ClassPathResource(filePath);
-            String content = new String(resource.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            if (!resource.exists()) {
+                log.warn("[Knowledge Init] classpath resource not found: {}", filePath);
+                return;
+            }
+            String content = StreamUtils.copyToString(resource.getInputStream(), StandardCharsets.UTF_8);
             int count = parseAndStore(content);
-            log.info("[知识库] 从 {} 导入 {} 条数据", filePath, count);
+            log.info("[Knowledge Init] imported {} knowledge blocks from {}", count, filePath);
         } catch (Exception e) {
-            log.error("[知识库] 导入文件 {} 失败: {}", filePath, e.getMessage());
+            log.error("[Knowledge Init] import failed, filePath={}", filePath, e);
         }
     }
 
     /**
-     * 解析 Markdown 文件：按 --- 分隔条目，前3行为元数据，其余为正文
+     * 解析 Markdown 文件：按 --- 分隔条目，前3行为元数据，空行后为正文
+     * 当前实现会：
+     * 1. 跳过元数据缺失 / 正文为空的异常块；
+     * 2. 对长度超出建议范围的条目打印 warn 日志；
+     * 3. 导入成功后自动清理 RAG 缓存。
      */
     public int parseAndStore(String content) {
-        int count = 0;
-        String[] blocks = content.split("(?m)^---\\s*$");
-        for (String block : blocks) {
-            block = block.trim();
-            if (block.isEmpty()) continue;
-            String[] lines = block.split("\\n", 5);
-            if (lines.length < 5) continue;
-            String contentType = lines[0].replace("content_type:", "").trim();
-            String tag         = lines[1].replace("tag:", "").trim();
-            String title       = lines[2].replace("title:", "").trim();
-            String body        = lines[4].trim();  // 第4行为空行，第5行起为正文
-            String fullText    = title + "\n" + body;
-            Metadata metadata  = Metadata.from(Map.of(
-                "content_type", contentType,
-                "tag",          tag
-            ));
-            Embedding embedding = embeddingModel.embed(fullText).content();
-            embeddingStore.add(embedding, TextSegment.from(fullText, metadata));
-            count++;
+        String normalized = content.replace("\uFEFF", "");
+        String[] blocks = normalized.split("(?m)^---\\s*$");
+        int importedCount = 0;
+        int skippedCount = 0;
+        for (int i = 0; i < blocks.length; i++) {
+            TextSegment segment = parseBlock(blocks[i], i + 1);
+            if (segment == null) {
+                skippedCount++;
+                continue;
+            }
+            Embedding embedding = embeddingModel.embed(segment.text()).content();
+            embeddingStore.add(embedding, segment);
+            importedCount++;
         }
-        return count;
+        if (importedCount > 0) {
+            ojKnowledgeRetriever.clearRagCache();
+        }
+        log.info("[Knowledge Init] import finished, imported={}, skipped={}", importedCount, skippedCount);
+        return importedCount;
+    }
+
+    private boolean hasKnowledgeData() {
+        Embedding probe = embeddingModel.embed("knowledge init probe").content();
+        List<EmbeddingMatch<TextSegment>> existing = embeddingStore.search(
+                EmbeddingSearchRequest.builder()
+                        .queryEmbedding(probe)
+                        .maxResults(1)
+                        .minScore(0.0)
+                        .build()
+        ).matches();
+        return existing != null && !existing.isEmpty();
     }
 }
 
 // ─────────────────────────────────────────────
-// 策略二：定时同步 MySQL 题目到向量库（每日凌晨2点）
+// 策略二：定时同步 MySQL 题目到独立题目向量库 oj_question（每日凌晨2点）
 // ─────────────────────────────────────────────
+@Service
+@Slf4j
+public class QuestionVectorSyncService {
+
+    @Autowired
+    private QuestionService questionService;
+    @Autowired
+    private EmbeddingModel embeddingModel;
+    @Autowired
+    @Qualifier("questionEmbeddingStore")
+    private MilvusEmbeddingStore questionEmbeddingStore;
+    @Autowired
+    private OJKnowledgeRetriever ojKnowledgeRetriever;
+
+    public int rebuildQuestionVectors() {
+        List<Question> questions = questionService.list(new QueryWrapper<Question>()
+                .eq("isDelete", 0));
+
+        questionEmbeddingStore.removeAll();
+
+        int success = 0, fail = 0;
+        for (Question q : questions) {
+            try {
+                String text = String.format("题目标题：%s\n题干：%s\n考点标签：%s",
+                        q.getTitle(), q.getContent(), q.getTags());
+                Map<String, Object> metadataMap = new HashMap<>();
+                metadataMap.put("question_id", q.getId());
+                metadataMap.put("content_type", "题目");
+                metadataMap.put("tag", q.getTags());
+                metadataMap.put("difficulty", q.getDifficulty());
+                Embedding embedding = embeddingModel.embed(text).content();
+                questionEmbeddingStore.add(embedding,
+                        TextSegment.from(text, Metadata.from(metadataMap)));
+                success++;
+            } catch (Exception e) {
+                fail++;
+                log.error("[向量同步] 题目 {} 同步失败: {}", q.getId(), e.getMessage());
+            }
+        }
+
+        // 题目向量变更后，清理相似题检索缓存
+        ojKnowledgeRetriever.clearRagCache();
+        log.info("[向量同步] 完成，成功 {} 条，失败 {} 条", success, fail);
+        return success;
+    }
+}
+
 @Component
 @Slf4j
 public class QuestionVectorSyncJob {
 
     @Autowired
-    private QuestionService questionService;
-    @Autowired
-    private MilvusEmbeddingStore embeddingStore;
-    @Autowired
-    private EmbeddingModel embeddingModel;
+    private QuestionVectorSyncService questionVectorSyncService;
 
     @Scheduled(cron = "0 0 2 * * ?")
     public void syncQuestionsToMilvus() {
-        log.info("[向量同步] 开始同步题目数据...");
-        List<Question> questions = questionService.list();
-        int success = 0, fail = 0;
-        for (Question q : questions) {
-            try {
-                // 只存标题+题干+标签，不存标准答案（防止 AI 直接泄题）
-                // 注意：当前项目 Question.tags 为 JSON 字符串，且无 difficulty 字段
-                String tagText = q.getTags();
-                String text = String.format("题目标题：%s\n题干：%s\n考点标签：%s",
-                        q.getTitle(), q.getContent(), tagText);
-                Metadata metadata = Metadata.from(Map.of(
-                        "question_id",  q.getId(),
-                        "content_type", "题目",
-                        "tag",          tagText
-                ));
-                Embedding embedding = embeddingModel.embed(text).content();
-                embeddingStore.add(embedding, TextSegment.from(text, metadata));
-                success++;
-            } catch (Exception e) {
-                log.error("[向量同步] 题目 {} 同步失败: {}", q.getId(), e.getMessage());
-                fail++;
-            }
-        }
-        log.info("[向量同步] 完成，成功 {} 条，失败 {} 条", success, fail);
+        questionVectorSyncService.rebuildQuestionVectors();
     }
 }
 
 // ─────────────────────────────────────────────
-// 策略三：管理员上传 Markdown 文件导入（随时补充知识点）
+// 策略三：管理员上传 Markdown 文件导入 knowledge collection（随时补充知识点）
 // ─────────────────────────────────────────────
 @RestController
+@RequestMapping("/admin/knowledge")
 @Slf4j
 public class KnowledgeImportController {
 
-    @Autowired
+    @Resource
     private KnowledgeInitializer knowledgeInitializer;
 
     /**
      * 管理员上传 .md 文件，批量导入知识点到向量库
      * 文件格式与 classpath 知识点文件一致（--- 分隔，前3行元数据）
      */
-    @PostMapping("/admin/knowledge/import")
+    @PostMapping("/import")
     @AuthCheck(mustRole = "admin")
     public BaseResponse<String> importKnowledge(
-            @RequestParam("file") MultipartFile file) throws IOException {
-        if (file.isEmpty()) {
+            @RequestPart("file") MultipartFile file) throws IOException {
+        if (file == null || file.isEmpty()) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "文件不能为空");
         }
+        String extension = StringUtils.getFilenameExtension(file.getOriginalFilename());
+        if (extension == null || !("md".equalsIgnoreCase(extension) || "markdown".equalsIgnoreCase(extension))) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "仅支持导入 .md / .markdown 文件");
+        }
         String content = new String(file.getBytes(), StandardCharsets.UTF_8);
-        int count = knowledgeInitializer.parseAndStore(content);
-        log.info("[知识库] 管理员上传文件导入 {} 条数据", count);
-        return ResultUtils.success("成功导入 " + count + " 条知识点数据");
+        int importedCount = knowledgeInitializer.parseAndStore(content);
+        if (importedCount <= 0) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "未解析到可导入的知识条目");
+        }
+        log.info("[Knowledge Import] admin imported file={}, count={}",
+                file.getOriginalFilename(), importedCount);
+        return ResultUtils.success("成功导入 " + importedCount + " 条知识条目");
     }
 }
 ```
@@ -3386,7 +3570,7 @@ flowchart LR
 ## 九、附录
 ### 9.1 核心接口规范
 
-> SSE 流式接口统一使用 GET 方式，响应头 `Content-Type: text/event-stream`，前端通过 `EventSource` 接收；每个 token 作为一条 `data` 事件推送，结束时推送 `data: [DONE]`。
+> SSE 流式接口统一使用 GET 方式，响应头 `Content-Type: text/event-stream`，前端通过 `EventSource` 接收；每个 token 作为一条 `data` 事件推送（JSON 格式 `{"d":"..."}`），结束时推送 `{"done":true}`。
 
 | 接口地址 | 请求方式 | 响应类型 | 接口描述 |
 |----------|----------|----------|----------|
@@ -3397,7 +3581,7 @@ flowchart LR
 | /api/ai/code/analysis | POST | application/json | 代码AI分析（阻塞式） |
 | /api/ai/code/analysis/stream | GET | text/event-stream | 代码AI分析 SSE 流式接口 |
 | /api/ai/code/history | GET | application/json | 获取用户代码分析历史 |
-| /api/ai/question/parse | GET | application/json | 获取题目AI解析（阻塞式） |
+| /api/ai/question/parse | POST | application/json | 获取题目AI解析（阻塞式） |
 | /api/ai/question/parse/stream | GET | text/event-stream | 题目AI解析 SSE 流式接口 |
 | /api/ai/question/similar | GET | application/json | 获取相似题目推荐 |
 | /api/ai/wrong-question/list | GET | application/json | 获取用户错题列表 |

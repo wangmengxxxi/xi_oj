@@ -27,6 +27,8 @@ public class AiWrongQuestion implements Serializable {
     /** 用户提交的错误代码 */
     @TableField("wrong_code")
     private String wrongCode;
+    /** 错误提交对应的代码语言（java / python / cpp 等） */
+    private String language;
     /** 错误判题结果（非 Accepted 的状态文本，如 Wrong Answer） */
     @TableField("wrong_judge_result")
     private String wrongJudgeResult;
