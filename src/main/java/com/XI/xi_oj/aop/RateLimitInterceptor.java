@@ -122,6 +122,71 @@ public class RateLimitInterceptor {
                                     "同一题目提交太频繁，请等待 " + rule.getWindow_seconds() + " 秒后再试"));
                 }
             }
+            case AI_IP_MINUTE -> {
+                redisKey = "rl:ip:" + clientIp + ":ai";
+                allowed = rateLimitRedisUtil.slidingWindowAllow(redisKey,
+                        rule.getWindow_seconds(), rule.getLimit_count());
+                if (!allowed) {
+                    log.warn("[RateLimit] AI IP限流触发，ip={}", clientIp);
+                    throw new BusinessException(ErrorCode.TOO_MANY_REQUESTS,
+                            buildMessage(customMessage, "AI接口请求过于频繁，请稍后再试"));
+                }
+            }
+            case AI_USER_MINUTE -> {
+                redisKey = "rl:user:" + userId + ":ai:min";
+                allowed = rateLimitRedisUtil.slidingWindowAllow(redisKey,
+                        rule.getWindow_seconds(), rule.getLimit_count());
+                if (!allowed) {
+                    log.info("[RateLimit] AI用户分钟级限流触发，userId={}", userId);
+                    throw new BusinessException(ErrorCode.TOO_MANY_REQUESTS,
+                            buildMessage(customMessage,
+                                    "AI调用太频繁，每分钟最多调用 " + rule.getLimit_count() + " 次，请稍后再试"));
+                }
+            }
+            case AI_CHAT_USER_DAY -> {
+                String today = LocalDate.now().format(DAY_FORMATTER);
+                redisKey = "rl:user:" + userId + ":ai:chat:day:" + today;
+                allowed = rateLimitRedisUtil.dailyCountAllow(redisKey, rule.getLimit_count());
+                if (!allowed) {
+                    log.info("[RateLimit] AI问答每日限流触发，userId={}", userId);
+                    throw new BusinessException(ErrorCode.TOO_MANY_REQUESTS,
+                            buildMessage(customMessage,
+                                    "今日AI问答次数已达上限（" + rule.getLimit_count() + " 次），明日再来吧"));
+                }
+            }
+            case AI_CODE_USER_DAY -> {
+                String today = LocalDate.now().format(DAY_FORMATTER);
+                redisKey = "rl:user:" + userId + ":ai:code:day:" + today;
+                allowed = rateLimitRedisUtil.dailyCountAllow(redisKey, rule.getLimit_count());
+                if (!allowed) {
+                    log.info("[RateLimit] AI代码分析每日限流触发，userId={}", userId);
+                    throw new BusinessException(ErrorCode.TOO_MANY_REQUESTS,
+                            buildMessage(customMessage,
+                                    "今日AI代码分析次数已达上限（" + rule.getLimit_count() + " 次），明日再来吧"));
+                }
+            }
+            case AI_QUESTION_USER_DAY -> {
+                String today = LocalDate.now().format(DAY_FORMATTER);
+                redisKey = "rl:user:" + userId + ":ai:question:day:" + today;
+                allowed = rateLimitRedisUtil.dailyCountAllow(redisKey, rule.getLimit_count());
+                if (!allowed) {
+                    log.info("[RateLimit] AI题目解析每日限流触发，userId={}", userId);
+                    throw new BusinessException(ErrorCode.TOO_MANY_REQUESTS,
+                            buildMessage(customMessage,
+                                    "今日AI题目解析次数已达上限（" + rule.getLimit_count() + " 次），明日再来吧"));
+                }
+            }
+            case AI_WRONG_USER_DAY -> {
+                String today = LocalDate.now().format(DAY_FORMATTER);
+                redisKey = "rl:user:" + userId + ":ai:wrong:day:" + today;
+                allowed = rateLimitRedisUtil.dailyCountAllow(redisKey, rule.getLimit_count());
+                if (!allowed) {
+                    log.info("[RateLimit] AI错题分析每日限流触发，userId={}", userId);
+                    throw new BusinessException(ErrorCode.TOO_MANY_REQUESTS,
+                            buildMessage(customMessage,
+                                    "今日AI错题分析次数已达上限（" + rule.getLimit_count() + " 次），明日再来吧"));
+                }
+            }
             default -> log.warn("[RateLimit] 未知限流类型：{}", type);
         }
     }

@@ -22,3 +22,12 @@ INSERT INTO rate_limit_rule (rule_key, rule_name, limit_count, window_seconds, i
                                                                                                            ('submit:user:minute',     '用户提交-分钟级限流',    5,   60,   1, '同一用户每分钟最多提交5次'),
                                                                                                            ('submit:user:day',        '用户提交-每日限流',       200, 86400,1, '同一用户每天最多提交200次'),
                                                                                                            ('submit:user:question:cooldown', '用户同题提交冷却', 1,   30,   1, '同一用户对同一题目30秒内只能提交1次');
+
+-- AI接口限流规则初始化
+INSERT INTO rate_limit_rule (rule_key, rule_name, limit_count, window_seconds, is_enable, description) VALUES
+    ('ai:ip:minute',         'AI接口IP-分钟级限流',       30,  60,    1, 'AI接口同一IP每分钟最多调用30次，防代理滥用'),
+    ('ai:user:minute',       'AI接口用户-分钟级限流',     10,  60,    1, 'AI接口用户每分钟最多调用10次，全功能共享'),
+    ('ai:chat:user:day',     'AI问答用户-每日限流',       100, 86400, 1, 'AI问答用户每天最多调用100次'),
+    ('ai:code:user:day',     'AI代码分析用户-每日限流',   30,  86400, 1, 'AI代码分析用户每天最多调用30次'),
+    ('ai:question:user:day', 'AI题目解析用户-每日限流',   50,  86400, 1, 'AI题目解析用户每天最多调用50次'),
+    ('ai:wrong:user:day',    'AI错题分析用户-每日限流',   30,  86400, 1, 'AI错题分析用户每天最多调用30次');

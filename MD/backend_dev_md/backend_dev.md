@@ -1152,7 +1152,7 @@ public class AiAgentFactory {
      * Milvus 向量库连接 Bean
      * - collectionName：全局唯一集合，所有类型数据通过 content_type 字段区分
      * - dimension：必须与 text-embedding-v3 维度一致（默认 1024）
-     * - autoCreateCollection：首次启动时若集合不存在则自动创建，无需在 Attu 手动建
+     * - 集合自动创建说明：在 langchain4j 1.0.0-beta3 中，集合不存在时会自动创建，无需额外开关
      * - metricType：COSINE 余弦相似度，适合文本语义匹配
      */
     @Bean
@@ -1162,7 +1162,7 @@ public class AiAgentFactory {
                 .port(milvusPort)
                 .collectionName("oj_knowledge")
                 .dimension(1024)
-                .autoCreateCollection(true)
+                .autoFlushOnInsert(true)
                 .metricType(MetricType.COSINE)
                 .build();
     }
@@ -1171,11 +1171,11 @@ public class AiAgentFactory {
      * 共享 ChatModel（阻塞式，供非流式调用使用）
      */
     @Bean
-    public ChatModel chatModel() {
+    public ChatLanguageModel chatModel() {
         return QwenChatModel.builder()
                 .apiKey(apiKey)
                 .modelName(configService.getConfigValue("ai.model.name"))
-                .temperature(0.2)
+                .temperature(0.2f)
                 .maxTokens(2048)
                 .build();
     }
@@ -2182,6 +2182,27 @@ public interface AiChatRecordMapper extends BaseMapper<AiChatRecord> {
     int deleteByUserAndChat(@Param("userId") Long userId, @Param("chatId") String chatId);
 }
 ```
+
+**`AiChatRequest.java` 与 `AiChatClearRequest.java`（Controller 层请求 DTO）**：
+```java
+@Data
+public class AiChatRequest {
+
+    @NotBlank(message = "chatId 不能为空")
+    private String chatId;
+
+    @NotBlank(message = "message 不能为空")
+    private String message;
+}
+
+@Data
+public class AiChatClearRequest {
+
+    @NotBlank(message = "chatId 不能为空")
+    private String chatId;
+}
+```
+> **放置路径**：`com.XI.xi_oj.ai.model`。
 
 **Controller 层补充（历史记录 + 清空接口）**：
 ```java
