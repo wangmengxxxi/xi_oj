@@ -309,14 +309,14 @@ CREATE TABLE IF NOT EXISTS ai_config
 |------------|--------------|-------------|
 | ai.global.enable | true | AI功能全局开关 |
 | ai.model.base_url | https://dashscope.aliyuncs.com/compatible-mode/v1 | 百炼OpenAI兼容端点，通常无需修改 |
-| ai.model.name | qwen-plus | 聊天模型名称（可选：qwen-turbo / qwen-plus / qwen-max）**⚠️ 修改后需重启服务** |
-| ai.model.embedding_name | text-embedding-v3 | 嵌入模型名称，修改后需重建向量索引 **⚠️ 修改后需重启服务** |
-| ai.rag.top_k | 3 | RAG检索返回条数（建议3-5）**⚠️ 修改后需重启服务** |
-| ai.rag.similarity_threshold | 0.7 | RAG最小相似度阈值（0-1，值越高检索越严格）**⚠️ 修改后需重启服务** |
+| ai.model.name | qwen-plus | 聊天模型名称（可选：qwen-turbo / qwen-plus / qwen-max）修改后即时重建生效 |
+| ai.model.embedding_name | text-embedding-v3 | 嵌入模型名称，修改后需重建向量索引。修改后即时重建生效 |
+| ai.rag.top_k | 3 | RAG检索返回条数（建议3-5）修改后即时重建生效 |
+| ai.rag.similarity_threshold | 0.7 | RAG最小相似度阈值（0-1，值越高检索越严格）修改后即时重建生效 |
 
 > **配置生效方式说明**：
 > - `ai.global.enable`、`ai.prompt.*` 等配置通过 Redis 缓存（TTL 5 分钟）读取，修改后无需重启，最多 5 分钟内全局生效；
-> - `ai.model.name`、`ai.model.embedding_name`、`ai.rag.top_k`、`ai.rag.similarity_threshold` 在 Spring Bean 初始化时读取并构建为单例客户端（`AiAgentFactory`），**修改后必须重启服务才能生效**。
+> - `ai.model.name`、`ai.model.embedding_name`、`ai.rag.top_k`、`ai.rag.similarity_threshold` 通过 `AiModelHolder` 动态持有，管理员修改后由 Spring 事件（`AiConfigChangedEvent`）触发即时重建，**无需重启服务**。
 
 **API Key 配置方式（环境变量注入）**：
 ```yaml
@@ -872,7 +872,7 @@ public class OJKnowledgeRetriever {
 
 #### 5.1.2 AiConfigService — 配置读取服务（完整实现）
 
-> **开发注意**：`AiAgentFactory`、`AiGlobalSwitchAspect` 均依赖本类，**必须先于 5.1.3 实现**。Prompt 动态管理所需的 `getPrompt()` 方法与完整 `READABLE_KEYS` 已一并写入本节，无需在后续章节回头修改。
+> **开发注意**：`AiModelHolder`、`AiGlobalSwitchAspect` 均依赖本类，**必须先于 5.1.3 实现**。Prompt 动态管理所需的 `getPrompt()` 方法与完整 `READABLE_KEYS` 已一并写入本节，无需在后续章节回头修改。
 
 **Entity：`AiConfig.java`**
 ```java
@@ -1082,7 +1082,7 @@ flowchart TD
 ```
 
 **架构说明**：
-根据各模块的调用特性，Agent 层分为三类实例，由统一的 `AiAgentFactory` 管理构建：
+根据各模块的调用特性，Agent 层分为三类实例，由 `AiModelHolder` 动态持有（支持配置变更后即时重建）。基础设施 Bean（Milvus 连接、ChatMemoryStore）仍由 `AiAgentFactory` 以 `@Bean` 方式提供：
 
 | Bean | 对应模块 | Memory | RAG | Tools | SSE流式 |
 |------|----------|--------|-----|-------|---------|
@@ -1165,34 +1165,17 @@ public interface OJStreamingService {
 }
 
 // ─────────────────────────────────────────────
-// AI工厂：统一构建所有 AI 实例，集中管理动态配置
+// AI工厂：基础设施 Bean（Milvus 连接、ChatMemoryStore）
 // ─────────────────────────────────────────────
 @Configuration
 public class AiAgentFactory {
 
-    @Autowired
-    private OJTools ojTools;
-    @Autowired
-    private AiConfigService configService;
-
-    /** API Key 从环境变量注入，不走数据库，避免敏感凭证落库 */
-    @Value("${ai.model.api-key}")
-    private String apiKey;
-
-    /** Milvus 连接配置，支持环境变量覆盖（容器化部署时注入） */
     @Value("${milvus.host:localhost}")
     private String milvusHost;
 
     @Value("${milvus.port:19530}")
     private int milvusPort;
 
-    /**
-     * Milvus 向量库连接 Bean
-     * - collectionName：全局唯一集合，所有类型数据通过 content_type 字段区分
-     * - dimension：必须与 text-embedding-v3 维度一致（默认 1024）
-     * - 集合自动创建说明：在 langchain4j 1.0.0-beta3 中，集合不存在时会自动创建，无需额外开关
-     * - metricType：COSINE 余弦相似度，适合文本语义匹配
-     */
     @Bean
     public MilvusEmbeddingStore embeddingStore() {
         return MilvusEmbeddingStore.builder()
@@ -1205,135 +1188,67 @@ public class AiAgentFactory {
                 .build();
     }
 
-    /**
-     * 共享 ChatModel（阻塞式，供非流式调用使用）
-     */
     @Bean
-    public ChatLanguageModel chatModel() {
-        return QwenChatModel.builder()
-                .apiKey(apiKey)
-                .modelName(configService.getConfigValue("ai.model.name"))
-                .temperature(0.2f)
-                .maxTokens(2048)
-                .build();
-    }
+    public MilvusEmbeddingStore questionEmbeddingStore() { /* 同上，collectionName="oj_question" */ }
 
-    /**
-     * 共享 StreamingChatModel（流式，供 SSE 接口使用）
-     * 与 ChatModel 共享同一 API Key 和模型配置
-     */
-    @Bean
-    public StreamingChatModel streamingChatModel() {
-        return QwenStreamingChatModel.builder()
-                .apiKey(apiKey)
-                .modelName(configService.getConfigValue("ai.model.name"))
-                .temperature(0.2)
-                .maxTokens(2048)
-                .build();
-    }
-
-    /**
-     * 共享 EmbeddingModel（无状态，单例复用）
-     */
-    @Bean
-    public EmbeddingModel embeddingModel() {
-        return QwenEmbeddingModel.builder()
-                .apiKey(apiKey)
-                .modelName(configService.getConfigValue("ai.model.embedding_name"))
-                .build();
-    }
-
-    /**
-     * Redis + MySQL 会话记忆存储
-     * - Redis：热会话窗口（低延迟）
-     * - MySQL：Redis miss 时回源，重建最近 N 轮上下文
-     */
     @Bean
     public ChatMemoryStore chatMemoryStore(AiChatMemoryStore aiChatMemoryStore) {
         return aiChatMemoryStore;
     }
+}
 
-    /**
-     * 5.3 AI问答 Agent：多轮记忆 + Tools + RAG + 流式/非流式双模式
-     * - memoryId 推荐使用 userId:chatId，避免不同用户 chatId 相同导致串会话
-     * - MessageWindowChatMemory 只保留窗口大小，不负责持久化
-     * - 持久化由 ChatMemoryStore（Redis + MySQL）负责
-     */
-    @Bean
-    public OJChatAgent ojChatAgent(ChatModel chatModel,
-                                   StreamingChatModel streamingChatModel,
-                                   EmbeddingModel embeddingModel,
-                                   ChatMemoryStore chatMemoryStore) {
-        return AiServices.builder(OJChatAgent.class)
-                .chatLanguageModel(chatModel)
-                .streamingChatLanguageModel(streamingChatModel)
-                .tools(ojTools)
-                .contentRetriever(buildRetriever(embeddingModel))
-                .chatMemoryProvider(memoryId -> MessageWindowChatMemory.builder()
-                        .id(memoryId)
-                        .maxMessages(20)
-                        .chatMemoryStore(chatMemoryStore)
-                        .build())
-                .build();
+// ─────────────────────────────────────────────
+// AiModelHolder：动态持有 AI 模型和 Agent 代理
+// 管理员修改 ai_config 后通过 AiConfigChangedEvent 触发即时重建
+// ─────────────────────────────────────────────
+@Component
+@Slf4j
+public class AiModelHolder {
+
+    private final AiConfigService aiConfigService;
+    private final OJTools ojTools;
+    private final MilvusEmbeddingStore embeddingStore;
+    private final ChatMemoryStore chatMemoryStore;
+
+    @Value("${ai.model.api-key}")
+    private String apiKey;
+
+    // volatile 保证多线程可见性
+    private volatile ChatLanguageModel chatModel;
+    private volatile StreamingChatLanguageModel streamingChatModel;
+    private volatile EmbeddingModel embeddingModel;
+    private volatile OJChatAgent ojChatAgent;
+    private volatile OJQuestionParseAgent ojQuestionParseAgent;
+    private volatile OJStreamingService ojStreamingService;
+
+    @PostConstruct
+    public void init() {
+        // 启动时首次构建所有模型和 Agent
+        this.chatModel = buildChatModel();
+        this.streamingChatModel = buildStreamingChatModel();
+        this.embeddingModel = buildEmbeddingModel();
+        this.ojStreamingService = buildStreamingService(this.streamingChatModel);
+        this.ojChatAgent = buildChatAgent();
+        this.ojQuestionParseAgent = buildQuestionParseAgent();
     }
 
-    /**
-     * 5.4 题目解析 Agent：RAG + 流式/非流式双模式，无记忆
-     */
-    @Bean
-    public OJQuestionParseAgent ojQuestionParseAgent(ChatModel chatModel,
-                                                      StreamingChatModel streamingChatModel,
-                                                      EmbeddingModel embeddingModel) {
-        return AiServices.builder(OJQuestionParseAgent.class)
-                .chatLanguageModel(chatModel)
-                .streamingChatLanguageModel(streamingChatModel)
-                .contentRetriever(buildRetriever(embeddingModel))
-                .build();
+    @EventListener
+    public void onConfigChanged(AiConfigChangedEvent event) {
+        String key = event.getConfigKey();
+        // ai.model.name → 重建全部模型 + Agent
+        // ai.model.embedding_name → 重建嵌入模型 + Agent
+        // ai.rag.top_k / ai.rag.similarity_threshold → 仅重建 Agent（内部 ContentRetriever 使用新参数）
     }
 
-    /**
-     * 5.2/5.5 无状态流式服务：只有 StreamingChatModel，无记忆无 RAG
-     * Prompt 由 Service 层手动拼装（含 RAG 检索结果）后整体传入
-     * 当前仓库为了兼容 langchain4j 1.0.0-beta3 已验证存在的方法，
-     * 直接使用 StreamingChatLanguageModel.chat(String, StreamingChatResponseHandler)
-     * 手动桥接为 Flux<String>，不依赖额外的 Reactor 适配器。
-     */
-    @Bean
-    public OJStreamingService ojStreamingService(StreamingChatModel streamingChatModel) {
-        return fullPrompt -> Flux.create(sink -> streamingChatModel.chat(
-                fullPrompt,
-                new StreamingChatResponseHandler() {
-                    @Override
-                    public void onPartialResponse(String partialResponse) {
-                        sink.next(partialResponse == null ? "" : partialResponse);
-                    }
+    // getter 供消费方获取最新实例
+    public ChatLanguageModel getChatModel() { return chatModel; }
+    public StreamingChatLanguageModel getStreamingChatModel() { return streamingChatModel; }
+    public EmbeddingModel getEmbeddingModel() { return embeddingModel; }
+    public OJChatAgent getOjChatAgent() { return ojChatAgent; }
+    public OJQuestionParseAgent getOjQuestionParseAgent() { return ojQuestionParseAgent; }
+    public OJStreamingService getOjStreamingService() { return ojStreamingService; }
 
-                    @Override
-                    public void onCompleteResponse(ChatResponse chatResponse) {
-                        sink.complete();
-                    }
-
-                    @Override
-                    public void onError(Throwable error) {
-                        sink.error(error);
-                    }
-                }
-        ));
-    }
-
-    /**
-     * 公共方法：构建 ContentRetriever，参数从 ai_config 动态读取
-     */
-    private ContentRetriever buildRetriever(EmbeddingModel embeddingModel) {
-        int topK = Integer.parseInt(configService.getConfigValue("ai.rag.top_k"));
-        double minScore = Double.parseDouble(configService.getConfigValue("ai.rag.similarity_threshold"));
-        return EmbeddingStoreContentRetriever.builder()
-                .embeddingStore(embeddingStore)
-                .embeddingModel(embeddingModel)
-                .maxResults(topK)
-                .minScore(minScore)
-                .build();
-    }
+    // builder 方法（与原 AiAgentFactory 逻辑一致，此处省略）
 }
 
 // ─────────────────────────────────────────────
@@ -2418,26 +2333,24 @@ public class AiChatMemoryStore implements ChatMemoryStore {
 
 > 说明：`memoryId` 兼容两种格式：`userId:chatId`（推荐）和旧格式 `chatId`（兼容历史数据）。
 
-#### 5.3.4 Agent 工厂（方法签名按 1.0.0-beta3）
+#### 5.3.4 模型持有与 Agent 构建（AiModelHolder，方法签名按 1.0.0-beta3）
 
-**`AiAgentFactory.java`（关键片段）**：
+**`AiAgentFactory.java`（基础设施 Bean）**：
 ```java
 @Bean
 public ChatMemoryStore chatMemoryStore(AiChatMemoryStore aiChatMemoryStore) {
     return aiChatMemoryStore;
 }
+```
 
-@Bean
-public OJChatAgent ojChatAgent(ChatLanguageModel chatModel,
-                               StreamingChatLanguageModel streamingChatModel,
-                               EmbeddingModel embeddingModel,
-                               MilvusEmbeddingStore embeddingStore,
-                               ChatMemoryStore chatMemoryStore) {
+**`AiModelHolder.java`（动态构建 OJChatAgent，关键片段）**：
+```java
+private OJChatAgent buildChatAgent() {
     return AiServices.builder(OJChatAgent.class)
-            .chatLanguageModel(chatModel)
-            .streamingChatLanguageModel(streamingChatModel)
+            .chatLanguageModel(this.chatModel)
+            .streamingChatLanguageModel(this.streamingChatModel)
             .tools(ojTools)
-            .contentRetriever(buildRetriever(embeddingModel, embeddingStore))
+            .contentRetriever(buildRetriever())
             .chatMemoryProvider(memoryId -> MessageWindowChatMemory.builder()
                     .id(memoryId)
                     .maxMessages(20)
@@ -2495,7 +2408,7 @@ POST /ai/chat/clear
 1. `sql/ai.sql`（确认 `ai_chat_record`）-> `AiChatRecord` 实体；
 2. `AiChatRecordMapper`（先有回源查询、游标查询、清空查询）；
 3. `AiChatMemoryStore`（依赖 Mapper + Redis + TimeUtil）；
-4. `AiAgentFactory`（注入 `ChatMemoryStore`，配置 `OJChatAgent`）；
+4. `AiAgentFactory`（注入 `ChatMemoryStore`，提供基础设施 Bean）+ `AiModelHolder`（动态构建 `OJChatAgent`）；
 5. `AiChatAsyncService`（先建异步落库能力）；
 6. `AiChatService` / `AiChatServiceImpl`（串起 Agent + DB + MemoryStore）；
 7. `AiChatController`（暴露 chat/stream/history/page/clear）；
@@ -2513,7 +2426,7 @@ POST /ai/chat/clear
 **功能描述**：为题目提供AI自动解析，根据当前题目考点、难度推荐相似题目，帮助用户针对性练习。
 
 **当前仓库落地状态（2026-04-22）**：
-- 已落地 `AiAgentFactory.ojQuestionParseAgent(...)` Bean；
+- 已落地 `AiModelHolder` 动态持有 `OJQuestionParseAgent`（配置变更后即时重建）；
 - 已落地 `AiQuestionParseService` / `AiQuestionParseServiceImpl`；
 - 已落地 `AiQuestionParseController`，对外提供阻塞式解析、SSE 流式解析、相似题检索三个接口；
 - 已接入 `ai.prompt.question_parse` 动态 Prompt 配置（`AiConfigService.getPrompt()` 内置乱码检测，异常配置自动回退默认模板）、`AI_QUESTION_USER_DAY` 每日限流、`OJKnowledgeRetriever.retrieveSimilarQuestions(...)` 难度过滤相似题推荐。
@@ -2524,7 +2437,7 @@ POST /ai/chat/clear
 3. 流式输出：直接调用 `OJQuestionParseAgent.parseStream(...)`，由 `AiQuestionParseController` 统一包装为 SSE JSON 事件。
 
 **实现依赖关系与推荐顺序**：
-1. 先完成 5.1 `AiAgentFactory.ojQuestionParseAgent(...)`，否则 Service 层没有可注入的 Agent Bean；
+1. 先完成 5.1 `AiModelHolder` 中的 `ojQuestionParseAgent` 构建逻辑，否则 Service 层没有可用的 Agent 实例；
 2. 再完成 5.10 的知识库导入 / 题目向量同步，否则 5.4 的 RAG 检索与相似题推荐拿不到有效上下文；
 3. 之后实现 `AiQuestionParseServiceImpl`，负责串联 `QuestionService + AiConfigService + OJQuestionParseAgent + OJKnowledgeRetriever`；
 4. 最后实现 `AiQuestionParseController`，挂接登录态、限流、SSE 输出协议。

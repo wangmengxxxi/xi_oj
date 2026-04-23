@@ -1,5 +1,6 @@
 package com.XI.xi_oj.controller;
 
+import com.XI.xi_oj.ai.rag.QuestionVectorSyncService;
 import com.XI.xi_oj.annotation.AuthCheck;
 import com.XI.xi_oj.common.BaseResponse;
 import com.XI.xi_oj.common.ErrorCode;
@@ -22,6 +23,9 @@ import java.util.Map;
 public class AiConfigController {
     @Autowired
     private AiConfigService aiConfigService;
+
+    @Autowired
+    private QuestionVectorSyncService questionVectorSyncService;
     /**
      * 可读写的配置 Key 白名单（含模型参数、RAG 参数、各模块 Prompt）
      * api_key 不在此列，统一走环境变量注入
@@ -52,6 +56,13 @@ public class AiConfigController {
                     "API Key 不允许通过接口修改，请使用环境变量 AI_API_KEY");
         }
         aiConfigService.updateConfig(request.getConfigKey(), request.getConfigValue());
-        return ResultUtils.success("配置更新成功，5分钟内全局生效");
+        return ResultUtils.success("配置更新成功，模型与 RAG 参数即时重建生效，Prompt 类配置最多 5 分钟内生效");
+    }
+
+    @PostMapping("/question-vector/rebuild")
+    @AuthCheck(mustRole = "admin")
+    public BaseResponse<String> rebuildQuestionVectors() {
+        int count = questionVectorSyncService.rebuildQuestionVectors();
+        return ResultUtils.success("题目向量重建完成，成功同步 " + count + " 道题目");
     }
 }

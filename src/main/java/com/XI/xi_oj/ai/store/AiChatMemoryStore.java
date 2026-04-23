@@ -28,7 +28,7 @@ public class AiChatMemoryStore implements ChatMemoryStore {
     private static final long MEMORY_TTL_MINUTES = 120;
 
     @Resource
-    private StringRedisTemplate redisTemplate;
+    private StringRedisTemplate stringRedisTemplate;
 
     @Resource
     private AiChatRecordMapper aiChatRecordMapper;
@@ -38,7 +38,7 @@ public class AiChatMemoryStore implements ChatMemoryStore {
         MemorySession session = MemorySession.from(memoryId);
         String key = MEMORY_KEY_PREFIX + session.getRedisSuffix();
 
-        String cached = redisTemplate.opsForValue().get(key);
+        String cached = stringRedisTemplate.opsForValue().get(key);
         if (StrUtil.isNotBlank(cached)) {
             return ChatMessageDeserializer.messagesFromJson(cached);
         }
@@ -74,7 +74,7 @@ public class AiChatMemoryStore implements ChatMemoryStore {
     @Override
     public void deleteMessages(Object memoryId) {
         MemorySession session = MemorySession.from(memoryId);
-        redisTemplate.delete(MEMORY_KEY_PREFIX + session.getRedisSuffix());
+        stringRedisTemplate.delete(MEMORY_KEY_PREFIX + session.getRedisSuffix());
     }
 
     private List<AiChatRecord> loadLatestRecords(MemorySession session) {
@@ -90,7 +90,7 @@ public class AiChatMemoryStore implements ChatMemoryStore {
 
     private void saveToRedis(String key, List<ChatMessage> messages) {
         String json = ChatMessageSerializer.messagesToJson(messages);
-        redisTemplate.opsForValue().set(key, json, TimeUtil.minutes(MEMORY_TTL_MINUTES));
+        stringRedisTemplate.opsForValue().set(key, json, TimeUtil.minutes(MEMORY_TTL_MINUTES));
     }
 
     @Getter

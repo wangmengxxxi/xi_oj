@@ -1,6 +1,6 @@
 # XI OJ AIGC 工程化实施文档（进阶版）
 
-更新时间：2026-04-22
+更新时间：2026-04-23
 适用对象：有 Java/Spring 开发经验，希望快速接手 XI OJ AIGC 模块并持续迭代的工程师
 
 ---
@@ -48,11 +48,13 @@ flowchart LR
     B --> C["AiGlobalSwitchAspect<br/>全局开关"]
     C --> D["RateLimitInterceptor<br/>分层限流"]
     D --> E["AI Service 编排层"]
-    E --> F["AiAgentFactory<br/>模型工厂"]
+    E --> F["AiModelHolder<br/>模型持有与动态重建"]
     E --> G["OJKnowledgeRetriever<br/>RAG 检索"]
     E --> H["MySQL / Redis<br/>持久化与缓存"]
     G --> I["Milvus<br/>oj_knowledge / oj_question"]
     F --> J["DashScope API<br/>Qwen Chat / Embedding"]
+    K["AiAgentFactory<br/>基础设施 Bean"] --> I
+    K --> H
 ```
 
 分层职责：
@@ -60,13 +62,13 @@ flowchart LR
 1. Controller 层：鉴权后的业务入口，负责参数接收、SSE 协议封装和响应格式统一。
 2. AOP 守门层：AI 全局开关（`AiGlobalSwitchAspect`）+ 多维限流策略（`@RateLimit`）。
 3. Service 层：业务编排（拼上下文、调 RAG、调模型、写库），是核心逻辑所在。
-4. 基础能力层：模型工厂（`AiAgentFactory`）、向量检索（`OJKnowledgeRetriever`）、会话记忆存储（`AiChatMemoryStore`）。
+4. 基础能力层：模型持有与动态重建（`AiModelHolder`）、基础设施 Bean 工厂（`AiAgentFactory`）、向量检索（`OJKnowledgeRetriever`）、会话记忆存储（`AiChatMemoryStore`）。
 5. 存储层：MySQL（持久化）+ Redis（缓存/记忆/限流/配置）+ Milvus（向量检索）。
 
 设计原则：
 
 1. 先守门再执行业务，避免无效 token 消耗和 API 调用成本。
-2. 业务逻辑不直连底层 SDK，统一走工厂/服务抽象，便于模型替换。
+2. 业务逻辑不直连底层 SDK，统一通过 `AiModelHolder` 获取模型实例，便于模型替换和动态重建。
 3. AI 能力和业务规则分离，便于独立演进。
 4. 所有 AI 流式接口统一 SSE 协议，降低前后端联调成本。
 
@@ -79,7 +81,7 @@ flowchart LR
 | `OJChatAgent` | AI 问答 | ✅ 多轮记忆（Redis+MySQL） | ✅ 自动注入 | ✅ 3个工具 | ✅ | 交互式编程问答 |
 | `OJQuestionParseAgent` | 题目解析 | ❌ 单次无状态 | ✅ 自动注入 | ❌ | ✅ | 结构化题目分析 |
 | `OJStreamingService` | 代码分析、错题分析 | ❌ | 手动调用 RAG | ❌ | ✅ | 无状态流式分析 |
-| `ChatLanguageModel`（直接注入） | 代码分析、错题分析（非流式） | ❌ | 手动调用 RAG | ❌ | ❌ | 同步阻塞分析 |
+| `ChatLanguageModel`（通过 `AiModelHolder` 获取） | 代码分析、错题分析（非流式） | ❌ | 手动调用 RAG | ❌ | ❌ | 同步阻塞分析 |
 
 能力理解：
 
@@ -90,50 +92,133 @@ flowchart LR
 
 关键代码位置：
 
-- `AiAgentFactory.java`：`src/main/java/com/XI/xi_oj/ai/agent/AiAgentFactory.java`
+- `AiModelHolder.java`：`src/main/java/com/XI/xi_oj/ai/agent/AiModelHolder.java`（模型持有与动态重建）
+- `AiAgentFactory.java`：`src/main/java/com/XI/xi_oj/ai/agent/AiAgentFactory.java`（基础设施 Bean 工厂）
+- `AiConfigChangedEvent.java`：`src/main/java/com/XI/xi_oj/ai/event/AiConfigChangedEvent.java`（配置变更事件）
 - `OJChatAgent.java`：`src/main/java/com/XI/xi_oj/ai/agent/OJChatAgent.java`
 - `OJQuestionParseAgent.java`：`src/main/java/com/XI/xi_oj/ai/agent/OJQuestionParseAgent.java`
 - `OJStreamingService.java`：`src/main/java/com/XI/xi_oj/ai/agent/OJStreamingService.java`
 
 ---
 
-## 5. AiAgentFactory 模型工厂：统一 Bean 生产中心
+## 5. AiAgentFactory + AiModelHolder：基础设施与模型动态管理
 
 ### 5.1 设计目标
 
-将所有 AI 相关 Bean 的创建集中到一个 `@Configuration` 类，实现：
-- 模型参数从 `ai_config` 表动态读取，运行时可调整。
+将 AI 基础设施 Bean（向量库连接、记忆存储）和 AI 模型实例（LLM、Embedding、Agent 代理）分离管理：
+- **`AiAgentFactory`**（`@Configuration`）：负责创建基础设施 Bean（MilvusEmbeddingStore、ChatMemoryStore），这些 Bean 生命周期与应用一致，不需要动态刷新。
+- **`AiModelHolder`**（`@Component`）：负责持有和动态重建所有 AI 模型实例和 Agent 代理。管理员修改 `ai_config` 配置后，通过 Spring 事件驱动即时重建受影响的模型，无需重启应用。
 - API Key 从环境变量 `${AI_API_KEY}` 注入，不落库不硬编码。
 - 向量库连接参数外部化配置（`milvus.host`、`milvus.port`）。
 
-### 5.2 Bean 清单与创建逻辑
+### 5.2 Bean 与模型清单
 
 ```
-AiAgentFactory
+AiAgentFactory（@Configuration — 基础设施 Bean，启动时创建，生命周期固定）
 ├── embeddingStore()          → MilvusEmbeddingStore (oj_knowledge, dim=1024, COSINE)
 ├── questionEmbeddingStore()  → MilvusEmbeddingStore (oj_question, dim=1024, COSINE)
-├── chatModel()               → QwenChatModel (temp=0.2, maxTokens=2048)
-├── streamingChatModel()      → QwenStreamingChatModel (temp=0.2, maxTokens=2048)
-├── embeddingModel()          → QwenEmbeddingModel
-├── chatMemoryStore()         → 委托给 AiChatMemoryStore
-├── ojChatAgent()             → AiServices 构建，绑定 chatModel + streamingModel + tools + RAG + memory
-├── ojQuestionParseAgent()    → AiServices 构建，绑定 chatModel + streamingModel + RAG（无 tools 无 memory）
-└── ojStreamingService()      → Lambda 实现，将 StreamingChatModel 适配为 Flux<String>
+└── chatMemoryStore()         → 委托给 AiChatMemoryStore（Redis L1 + MySQL L2）
+
+AiModelHolder（@Component — 模型与代理，volatile 持有，配置变更时即时重建）
+├── chatModel                 → QwenChatModel (temp=0.2, maxTokens=2048)
+├── streamingChatModel        → QwenStreamingChatModel (temp=0.2, maxTokens=2048)
+├── embeddingModel            → QwenEmbeddingModel
+├── ojChatAgent               → AiServices 构建，绑定 chatModel + streamingModel + tools + RAG + memory
+├── ojQuestionParseAgent      → AiServices 构建，绑定 chatModel + streamingModel + RAG（无 tools 无 memory）
+└── ojStreamingService        → Lambda 实现，将 StreamingChatModel 适配为 Flux<String>
 ```
 
-### 5.3 关键设计决策
+### 5.3 动态重建机制
+
+管理员通过 `/admin/ai/config` 修改配置时，`AiConfigServiceImpl` 发布 `AiConfigChangedEvent`，`AiModelHolder` 通过 `@EventListener` 监听并按配置 key 精准重建受影响的模型：
+
+| 配置 Key | 重建范围 |
+|---------|---------|
+| `ai.model.name` | chatModel + streamingChatModel + ojStreamingService + ojChatAgent + ojQuestionParseAgent（全部模型和代理） |
+| `ai.model.embedding_name` | embeddingModel + ojChatAgent + ojQuestionParseAgent（嵌入模型 + 两个代理） |
+| `ai.rag.top_k` / `ai.rag.similarity_threshold` | ojChatAgent + ojQuestionParseAgent（仅重建代理，因为 ContentRetriever 内含 RAG 参数） |
+
+**为什么用 Holder 模式而非 `@RefreshScope` 或 `AtomicReference`：**
+- `@RefreshScope` 需要 Spring Cloud 依赖，项目未引入，且对 AiServices 代理不友好。
+- 在 Factory 里用 `AtomicReference` 无效——消费方通过 `@Resource` 持有的是 Bean 初始化时的直接引用，换了 AtomicReference 里的值也不会传播到字段注入的消费方。
+- **Holder 模式**：消费方注入 `AiModelHolder` 本身（一个稳定的 Spring 单例），通过 `holder.getChatModel()` 获取最新实例——Holder 内部更换实例对消费方完全透明。
+
+**为什么用 Spring 事件而非直接调用：**
+- `AiModelHolder` 依赖 `AiConfigService`（读取配置值），`AiConfigServiceImpl` 需要通知 `AiModelHolder` 重建——构成循环依赖。
+- 通过 `ApplicationEventPublisher` 发布 `AiConfigChangedEvent`，`AiModelHolder` 用 `@EventListener` 监听，完全解耦，无循环依赖。
+
+**记忆不丢失：** 重建 Agent 代理时，`chatMemoryStore` 是构造注入的稳定引用（指向 `AiChatMemoryStore` 单例，底层 Redis + MySQL），不会被重建。新代理的 `chatMemoryProvider` lambda 引用同一个 `chatMemoryStore`，用户对话记忆完整保留。
+
+### 5.4 关键设计决策
 
 1. 双 MilvusEmbeddingStore：`oj_knowledge`（知识库）和 `oj_question`（题目向量）分离，避免检索污染。
 2. `OJStreamingService` 用 Lambda + `Flux.create()` + `StreamingChatResponseHandler` 回调桥接 Reactor 响应式流。
 3. `chatMemoryProvider` 使用 `MessageWindowChatMemory`（窗口大小 20），每个 `memoryId` 独立窗口。
-4. `buildRetriever()` 的 `topK` 和 `minScore` 从配置中心动态读取，无需重启即可调整检索参数。
+4. `buildRetriever()` 的 `topK` 和 `minScore` 从配置中心动态读取，修改后即时重建 Agent 生效。
+5. 所有消费方（Service 层）注入 `AiModelHolder` 而非直接注入模型 Bean，通过 getter 获取最新实例。
 
-### 5.4 代码片段（OJStreamingService Lambda 桥接）
+### 5.5 代码片段
+
+**AiModelHolder 核心结构：**
 
 ```java
-@Bean
-public OJStreamingService ojStreamingService(StreamingChatLanguageModel streamingChatModel) {
-    return fullPrompt -> Flux.create(sink -> streamingChatModel.chat(
+@Component
+@Slf4j
+public class AiModelHolder {
+
+    private static final Set<String> MODEL_NAME_KEYS = Set.of("ai.model.name");
+    private static final Set<String> EMBEDDING_NAME_KEYS = Set.of("ai.model.embedding_name");
+    private static final Set<String> RAG_KEYS = Set.of("ai.rag.top_k", "ai.rag.similarity_threshold");
+
+    private final AiConfigService aiConfigService;
+    private final OJTools ojTools;
+    private final MilvusEmbeddingStore embeddingStore;
+    private final ChatMemoryStore chatMemoryStore;
+
+    @Value("${ai.model.api-key}")
+    private String apiKey;
+
+    private volatile ChatLanguageModel chatModel;
+    private volatile StreamingChatLanguageModel streamingChatModel;
+    private volatile EmbeddingModel embeddingModel;
+    private volatile OJChatAgent ojChatAgent;
+    private volatile OJQuestionParseAgent ojQuestionParseAgent;
+    private volatile OJStreamingService ojStreamingService;
+
+    @PostConstruct
+    public void init() {
+        this.chatModel = buildChatModel();
+        this.streamingChatModel = buildStreamingChatModel();
+        this.embeddingModel = buildEmbeddingModel();
+        this.ojStreamingService = buildStreamingService(this.streamingChatModel);
+        this.ojChatAgent = buildChatAgent();
+        this.ojQuestionParseAgent = buildQuestionParseAgent();
+    }
+
+    @EventListener
+    public void onConfigChanged(AiConfigChangedEvent event) {
+        String key = event.getConfigKey();
+        if (MODEL_NAME_KEYS.contains(key)) {
+            // 重建全部模型和代理
+        } else if (EMBEDDING_NAME_KEYS.contains(key)) {
+            // 重建嵌入模型和两个代理
+        } else if (RAG_KEYS.contains(key)) {
+            // 仅重建两个代理（ContentRetriever 参数变化）
+        }
+    }
+
+    // getter 方法供消费方调用
+    public ChatLanguageModel getChatModel() { return chatModel; }
+    public OJChatAgent getOjChatAgent() { return ojChatAgent; }
+    // ... 其他 getter
+}
+```
+
+**OJStreamingService Lambda 桥接（在 AiModelHolder 内部构建）：**
+
+```java
+private OJStreamingService buildStreamingService(StreamingChatLanguageModel model) {
+    return fullPrompt -> Flux.create(sink -> model.chat(
             fullPrompt,
             new StreamingChatResponseHandler() {
                 @Override public void onPartialResponse(String partialResponse) {
@@ -148,6 +233,17 @@ public OJStreamingService ojStreamingService(StreamingChatLanguageModel streamin
             }
     ));
 }
+```
+
+**消费方注入方式（以 AiChatServiceImpl 为例）：**
+
+```java
+@Resource
+private AiModelHolder aiModelHolder;
+
+// 使用时通过 getter 获取最新模型实例
+aiModelHolder.getOjChatAgent().chat(memoryId, message);
+aiModelHolder.getOjChatAgent().chatStream(memoryId, message);
 ```
 
 ---
@@ -603,13 +699,24 @@ public void checkAiSwitch(JoinPoint joinPoint) {
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
 │  Admin 后台   │────→│  ai_config   │────→│  Redis 缓存   │
 │  修改配置     │     │  MySQL 表    │     │  TTL=5min    │
-└──────────────┘     └──────────────┘     └──────────────┘
-                                                 ↓
-                                          ┌──────────────┐
-                                          │  Service 层   │
-                                          │  读取配置     │
-                                          └──────────────┘
+└──────────────┘     └──────────────┘     └──────┬───────┘
+                           │                      │
+                           │ (模型/RAG 参数)       │ (Prompt/开关)
+                           ↓                      ↓
+                    ┌──────────────────┐    ┌──────────────┐
+                    │ AiConfigChanged  │    │  Service 层   │
+                    │ Event (即时)     │    │ 读取配置      │
+                    └────────┬─────────┘    │ (最多5min)   │
+                             ↓              └──────────────┘
+                    ┌──────────────────┐
+                    │  AiModelHolder   │
+                    │  即时重建模型/代理 │
+                    └──────────────────┘
 ```
+
+**两类配置的生效方式：**
+- **模型/RAG 参数**（`ai.model.name`、`ai.model.embedding_name`、`ai.rag.top_k`、`ai.rag.similarity_threshold`）：修改后通过 `AiConfigChangedEvent` → `AiModelHolder.onConfigChanged()` **即时重建**受影响的模型和代理，无需重启。
+- **Prompt/开关类配置**（`ai.prompt.*`、`ai.global.enable`）：每次请求时从 Redis 读取，Redis TTL 5 分钟后回源 MySQL，最多 5 分钟生效。
 
 可动态配置的参数（白名单）：
 - `ai.model.name`：对话模型名称
@@ -692,7 +799,7 @@ return aiChatService.chatStream(chatId, loginUser.getId(), message)
 
 | # | 优化方向 | 基础 Demo 常见做法 | XI OJ 当前做法 | 工程价值 |
 |---|---|---|---|---|
-| 1 | 模型初始化 | Controller 直接 new 或直注模型 | `AiAgentFactory` 统一生产 Bean | 解耦、可替换、可配置 |
+| 1 | 模型管理 | Controller 直接 new 或直注模型 | `AiModelHolder` 持有模型 + 配置变更即时重建 | 解耦、可替换、动态生效 |
 | 2 | 向量检索架构 | 单向量库混合检索 | 双 collection：`oj_knowledge` + `oj_question` | 避免检索污染 |
 | 3 | RAG 过滤 | 仅按相似度阈值 | `content_type` + `difficulty` metadata 过滤 | 精准召回 |
 | 4 | RAG 检索性能 | 每次直查向量库 | RAG 结果 Redis 缓存（TTL 60min） | 降时延、提吞吐 |
@@ -710,20 +817,23 @@ return aiChatService.chatStream(chatId, loginUser.getId(), message)
 
 ### 13.2 优化点深度解析
 
-#### 优化 1：模型工厂统一管理（AiAgentFactory）
+#### 优化 1：模型动态管理（AiModelHolder + AiAgentFactory）
 
 **基础 Demo 的问题：**
 - 在 Controller 或 Service 中直接 `new QwenChatModel(...)`，模型参数散落各处。
-- 更换模型需要改多处代码。
+- 更换模型需要改多处代码并重启应用。
 - API Key 可能硬编码在代码中。
+- 模型参数写死在 `@Bean` 方法中，修改后必须重启才能生效。
 
 **XI OJ 的做法：**
-- 所有 AI Bean 集中在 `AiAgentFactory` 一个 `@Configuration` 类中创建。
+- 基础设施 Bean（MilvusEmbeddingStore、ChatMemoryStore）集中在 `AiAgentFactory`（`@Configuration`）中创建，生命周期与应用一致。
+- AI 模型实例和 Agent 代理由 `AiModelHolder`（`@Component`）用 `volatile` 引用持有，支持运行时动态重建。
 - 模型名称从 `ai_config` 表动态读取（`ai.model.name`、`ai.model.embedding_name`）。
+- 管理员修改模型/RAG 配置后，`AiConfigServiceImpl` 发布 `AiConfigChangedEvent`，`AiModelHolder` 监听事件并按配置 key **即时重建**受影响的模型和代理，无需重启。
+- 所有消费方注入 `AiModelHolder` 单例，通过 getter 获取最新模型实例（Holder 模式），重建对消费方透明。
 - API Key 从环境变量 `${ai.model.api-key}` 注入，不落库不硬编码。
-- 温度、maxTokens 等参数统一管理。
 
-**工程价值：** 更换模型只需修改数据库配置，无需改代码重新部署。
+**工程价值：** 更换模型只需修改数据库配置，模型和代理即时重建生效，无需改代码、无需重启。
 
 #### 优化 2：双向量库隔离检索
 
@@ -807,11 +917,13 @@ return aiChatService.chatStream(chatId, loginUser.getId(), message)
 **XI OJ 的做法：**
 - `ai_config` 表存储所有可调参数和 Prompt 模板。
 - Redis 缓存配置值（TTL 5 分钟），减少 DB 查询。
-- 管理员通过 `/admin/ai/config` 接口实时修改。
+- 管理员通过 `/admin/ai/config` 接口修改配置。
+- **模型/RAG 参数**（`ai.model.name`、`ai.model.embedding_name`、`ai.rag.top_k`、`ai.rag.similarity_threshold`）修改后通过 `AiConfigChangedEvent` → `AiModelHolder` **即时重建**生效。
+- **Prompt/开关类配置** 通过 Redis TTL 自然过期后回源 MySQL，最多 5 分钟生效。
 - Prompt 读取三层防护：空值回退 → 乱码检测回退 → 正常返回。
 - API Key 禁止通过接口修改，只能通过环境变量设置。
 
-**工程价值：** 运维人员可以在不重启应用的情况下调整 Prompt、模型参数、RAG 参数。
+**工程价值：** 运维人员可以在不重启应用的情况下调整 Prompt、模型参数、RAG 参数。其中模型和 RAG 参数改完即时生效，Prompt 最多 5 分钟内生效。
 
 #### 优化 8：全局开关 + AI 分层限流
 
@@ -940,7 +1052,7 @@ return aiChatService.chatStream(chatId, loginUser.getId(), message)
 ## 15. 推荐开发顺序（接手实践）
 
 1. 先确认 SQL 已执行，`ai_config` 表有基础参数。
-2. 再验证 `AiAgentFactory` 能正常创建 Bean（检查 Milvus 连接、DashScope API Key）。
+2. 再验证 `AiAgentFactory` 基础设施 Bean 正常创建（检查 Milvus 连接）和 `AiModelHolder` 模型初始化成功（检查 DashScope API Key、启动日志 `all AI models and agents initialized`）。
 3. 再验证 RAG：知识导入（启动日志）、题目向量同步、相似题检索。
 4. 再验证守门：全局开关关闭/开启、限流触发。
 5. 再逐模块联调：AI 问答 → 代码分析 → 题目解析 → 错题分析。
@@ -1021,7 +1133,7 @@ return aiChatService.chatStream(chatId, loginUser.getId(), message)
 
 XI OJ AIGC 当前已经从"能跑通 Demo"演进到"可配置、可治理、可持续优化"的工程形态。核心体现在：
 
-1. 架构层面：模型工厂统一管理、双向量库隔离、Agent/Service 分层清晰。
+1. 架构层面：`AiModelHolder` 模型动态管理与即时重建、双向量库隔离、Agent/Service 分层清晰。
 2. 性能层面：RAG 缓存、配置缓存、记忆缓存三级 Redis 缓存体系。
 3. 安全层面：全局开关、分层限流、Prompt 乱码防护、缓存穿透防护、AI 判题隔离。
 4. 可维护性：配置中心动态治理、SSE 统一协议、游标分页、知识库全生命周期管理。

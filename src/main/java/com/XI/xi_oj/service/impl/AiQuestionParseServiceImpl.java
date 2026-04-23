@@ -1,7 +1,7 @@
 package com.XI.xi_oj.service.impl;
 
 import cn.hutool.json.JSONUtil;
-import com.XI.xi_oj.ai.agent.OJQuestionParseAgent;
+import com.XI.xi_oj.ai.agent.AiModelHolder;
 import com.XI.xi_oj.ai.rag.OJKnowledgeRetriever;
 import com.XI.xi_oj.common.ErrorCode;
 import com.XI.xi_oj.exception.BusinessException;
@@ -32,7 +32,7 @@ public class AiQuestionParseServiceImpl implements AiQuestionParseService {
             """;
 
     @Resource
-    private OJQuestionParseAgent ojQuestionParseAgent;
+    private AiModelHolder aiModelHolder;
 
     @Resource
     private OJKnowledgeRetriever ojKnowledgeRetriever;
@@ -47,7 +47,7 @@ public class AiQuestionParseServiceImpl implements AiQuestionParseService {
     public AiQuestionParseResponse parseQuestion(Long userId, Long questionId) {
         Question question = requireQuestion(questionId);
         String context = buildQuestionContext(question);
-        String analysis = ojQuestionParseAgent.parse(context);
+        String analysis = aiModelHolder.getOjQuestionParseAgent().parse(context);
         List<Long> similarQuestionIds = getSimilarQuestionIds(question);
         log.info("[AI Question Parse] parsed questionId={}, userId={}, similarCount={}",
                 questionId, userId, similarQuestionIds.size());
@@ -63,7 +63,7 @@ public class AiQuestionParseServiceImpl implements AiQuestionParseService {
         Question question = requireQuestion(questionId);
         String context = buildQuestionContext(question);
         log.info("[AI Question Parse] stream parse start, questionId={}, userId={}", questionId, userId);
-        return ojQuestionParseAgent.parseStream(context)
+        return aiModelHolder.getOjQuestionParseAgent().parseStream(context)
                 .doOnError(e -> log.error("[AI Question Parse] stream parse failed, questionId={}, userId={}",
                         questionId, userId, e));
     }

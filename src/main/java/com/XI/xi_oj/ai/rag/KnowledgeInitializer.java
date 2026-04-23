@@ -1,11 +1,11 @@
 package com.XI.xi_oj.ai.rag;
 
+import com.XI.xi_oj.ai.agent.AiModelHolder;
 import com.XI.xi_oj.common.ErrorCode;
 import com.XI.xi_oj.exception.BusinessException;
 import dev.langchain4j.data.document.Metadata;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
-import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.store.embedding.EmbeddingMatch;
 import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
 import dev.langchain4j.store.embedding.milvus.MilvusEmbeddingStore;
@@ -19,6 +19,7 @@ import org.springframework.util.StreamUtils;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -39,7 +40,7 @@ public class KnowledgeInitializer implements CommandLineRunner {
     private MilvusEmbeddingStore embeddingStore;
 
     @Resource
-    private EmbeddingModel embeddingModel;
+    private AiModelHolder aiModelHolder;
 
     @Resource
     private OJKnowledgeRetriever ojKnowledgeRetriever;
@@ -51,8 +52,19 @@ public class KnowledgeInitializer implements CommandLineRunner {
             return;
         }
         log.info("[Knowledge Init] knowledge collection is empty, start importing classpath markdown files");
+        StringBuilder allContent = new StringBuilder();
         for (String filePath : KNOWLEDGE_FILES) {
-            importFromClasspath(filePath);
+            String content = loadClasspathContent(filePath);
+            if (content != null) {
+                if (!allContent.isEmpty()) {
+                    allContent.append("\n---\n");
+                }
+                allContent.append(content);
+            }
+        }
+        if (!allContent.isEmpty()) {
+            int count = parseAndStore(allContent.toString());
+            log.info("[Knowledge Init] total imported {} knowledge blocks from {} files", count, KNOWLEDGE_FILES.length);
         }
     }
 
@@ -62,7 +74,8 @@ public class KnowledgeInitializer implements CommandLineRunner {
         }
         String normalized = markdownContent.replace("\uFEFF", "");
         String[] blocks = normalized.split("(?m)^---\\s*$");
-        int importedCount = 0;
+        List<Embedding> embeddings = new ArrayList<>();
+        List<TextSegment> segments = new ArrayList<>();
         int skippedCount = 0;
         for (int i = 0; i < blocks.length; i++) {
             String block = blocks[i] == null ? "" : blocks[i].trim();
@@ -74,35 +87,36 @@ public class KnowledgeInitializer implements CommandLineRunner {
                 skippedCount++;
                 continue;
             }
-            Embedding embedding = embeddingModel.embed(segment.text()).content();
-            embeddingStore.add(embedding, segment);
-            importedCount++;
+            Embedding embedding = aiModelHolder.getEmbeddingModel().embed(segment.text()).content();
+            embeddings.add(embedding);
+            segments.add(segment);
         }
-        if (importedCount > 0) {
+        if (!embeddings.isEmpty()) {
+            embeddingStore.addAll(embeddings, segments);
             ojKnowledgeRetriever.clearRagCache();
         }
+        int importedCount = embeddings.size();
         log.info("[Knowledge Init] import finished, imported={}, skipped={}", importedCount, skippedCount);
         return importedCount;
     }
 
-    private void importFromClasspath(String filePath) {
+    private String loadClasspathContent(String filePath) {
         try {
             ClassPathResource resource = new ClassPathResource(filePath);
             if (!resource.exists()) {
                 log.warn("[Knowledge Init] classpath resource not found: {}", filePath);
-                return;
+                return null;
             }
-            String content = StreamUtils.copyToString(resource.getInputStream(), StandardCharsets.UTF_8);
-            int count = parseAndStore(content);
-            log.info("[Knowledge Init] imported {} knowledge blocks from {}", count, filePath);
+            return StreamUtils.copyToString(resource.getInputStream(), StandardCharsets.UTF_8);
         } catch (IOException e) {
-            log.error("[Knowledge Init] import failed, filePath={}", filePath, e);
+            log.error("[Knowledge Init] load failed, filePath={}", filePath, e);
+            return null;
         }
     }
 
     private boolean hasKnowledgeData() {
         try {
-            Embedding probe = embeddingModel.embed("knowledge init probe").content();
+            Embedding probe = aiModelHolder.getEmbeddingModel().embed("knowledge init probe").content();
             List<EmbeddingMatch<TextSegment>> existing = embeddingStore.search(
                     EmbeddingSearchRequest.builder()
                             .queryEmbedding(probe)

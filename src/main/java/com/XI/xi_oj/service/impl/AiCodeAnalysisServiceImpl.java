@@ -1,7 +1,7 @@
 package com.XI.xi_oj.service.impl;
 
 import cn.hutool.json.JSONUtil;
-import com.XI.xi_oj.ai.agent.OJStreamingService;
+import com.XI.xi_oj.ai.agent.AiModelHolder;
 import com.XI.xi_oj.ai.rag.OJKnowledgeRetriever;
 import com.XI.xi_oj.common.ErrorCode;
 import com.XI.xi_oj.exception.BusinessException;
@@ -18,7 +18,6 @@ import com.XI.xi_oj.service.AiConfigService;
 import com.XI.xi_oj.service.QuestionService;
 import com.XI.xi_oj.service.QuestionSubmitService;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
-import dev.langchain4j.model.chat.ChatLanguageModel;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -48,10 +47,7 @@ public class AiCodeAnalysisServiceImpl implements AiCodeAnalysisService {
     private static final Pattern SCORE_PATTERN_2 = Pattern.compile("(\\d{1,2})\\s*/\\s*10");
 
     @Resource
-    private ChatLanguageModel chatModel;
-
-    @Resource
-    private OJStreamingService ojStreamingService;
+    private AiModelHolder aiModelHolder;
 
     @Resource
     private OJKnowledgeRetriever ojKnowledgeRetriever;
@@ -72,7 +68,7 @@ public class AiCodeAnalysisServiceImpl implements AiCodeAnalysisService {
     public String analyzeCode(Long userId, AiCodeAnalysisRequest request) {
         CodeAnalysisContext context = buildContext(userId, request);
         String prompt = buildPrompt(context);
-        String analysis = chatModel.chat(prompt);
+        String analysis = aiModelHolder.getChatModel().chat(prompt);
         saveAnalysis(context, analysis);
         return analysis;
     }
@@ -86,7 +82,7 @@ public class AiCodeAnalysisServiceImpl implements AiCodeAnalysisService {
         String prompt = buildPrompt(context);
 
         StringBuilder buffer = new StringBuilder();
-        return ojStreamingService.stream(prompt)
+        return aiModelHolder.getOjStreamingService().stream(prompt)
                 .doOnNext(token -> buffer.append(token == null ? "" : token))
                 .doOnComplete(() -> saveAnalysis(context, buffer.toString()))
                 .doOnError(e -> log.error("[AI Code] stream analyze failed, userId={}, questionId={}, submitId={}",

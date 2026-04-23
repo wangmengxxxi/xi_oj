@@ -1,6 +1,6 @@
 # XI OJ AIGC 进阶优化方案：RAG 深度优化 + 自定义 Agent Loop
 
-更新时间：2026-04-22
+更新时间：2026-04-23
 前置依赖：已完成 AIGC 基础模块（参见 `aigc_engineering_implementation_guide.md`）
 
 ---
@@ -396,8 +396,7 @@ public class QueryRewriter {
     private static final int MIN_QUERY_LENGTH = 4;
 
     @Resource
-    @Qualifier("rewriteModel")
-    private ChatLanguageModel rewriteModel;
+    private AiModelHolder aiModelHolder;
 
     @Resource
     private StringRedisTemplate redisTemplate;
@@ -428,7 +427,7 @@ public class QueryRewriter {
         }
 
         try {
-            String rewritten = rewriteModel.chat(String.format(REWRITE_PROMPT, originalQuery));
+            String rewritten = aiModelHolder.getRewriteModel().chat(String.format(REWRITE_PROMPT, originalQuery));
             if (rewritten == null || rewritten.isBlank()) {
                 return originalQuery;
             }
@@ -445,18 +444,31 @@ public class QueryRewriter {
 }
 ```
 
-#### 2.3.4 AiAgentFactory 新增 rewriteModel Bean
+#### 2.3.4 AiModelHolder 新增 rewriteModel
+
+在 `AiModelHolder` 中新增 `rewriteModel` 的构建和 getter（因为当前所有 AI 模型实例统一由 `AiModelHolder` 持有和管理，`AiAgentFactory` 仅负责基础设施 Bean）：
 
 ```java
-// 在 AiAgentFactory.java 中新增
-@Bean
-public ChatLanguageModel rewriteModel() {
+// 在 AiModelHolder.java 中新增
+private volatile ChatLanguageModel rewriteModel;
+
+@PostConstruct
+public void init() {
+    // ... 现有模型构建
+    this.rewriteModel = buildRewriteModel();
+}
+
+private ChatLanguageModel buildRewriteModel() {
     return QwenChatModel.builder()
             .apiKey(apiKey)
             .modelName("qwen-turbo")  // 便宜快速的模型
             .temperature(0.1f)         // 低温度，输出稳定
             .maxTokens(256)            // 改写不需要长输出
             .build();
+}
+
+public ChatLanguageModel getRewriteModel() {
+    return rewriteModel;
 }
 ```
 
@@ -612,7 +624,7 @@ public class RerankService {
 private RerankService rerankService;
 
 public String doRetrieve(String query, int topK, double minScore) {
-    Embedding queryEmbedding = embeddingModel.embed(query).content();
+    Embedding queryEmbedding = aiModelHolder.getEmbeddingModel().embed(query).content();
     EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
             .queryEmbedding(queryEmbedding)
             .maxResults(topK * 3)       // ← 粗排多取（原来是 topK）
@@ -775,7 +787,7 @@ flowchart TD
 
 | 步骤 | 改动文件 | 改动类型 | 说明 |
 |---|---|---|---|
-| 1 | `AiAgentFactory.java` | 修改 | 新增 `rewriteModel` Bean |
+| 1 | `AiModelHolder.java` | 修改 | 新增 `rewriteModel` 构建和 getter |
 | 2 | `QueryRewriter.java` | 新增 | Query Rewrite 组件 |
 | 3 | `OJKnowledgeRetriever.java` | 修改 | 接入 QueryRewriter |
 | 4 | 跑评估基线 | 测试 | 记录优化前指标 |
@@ -1007,7 +1019,7 @@ public class AgentLoopService {
             """.formatted(MAX_STEPS);
 
     @Resource
-    private ChatLanguageModel chatModel;
+    private AiModelHolder aiModelHolder;
 
     @Resource
     private ToolDispatcher toolDispatcher;
@@ -1026,7 +1038,7 @@ public class AgentLoopService {
             long stepStart = System.currentTimeMillis();
 
             // 1. 调用 LLM
-            String llmOutput = chatModel.chat(conversationHistory.toString());
+            String llmOutput = aiModelHolder.getChatModel().chat(conversationHistory.toString());
             conversationHistory.append("Assistant: ").append(llmOutput).append("\n\n");
 
             // 2. 解析输出
@@ -1078,7 +1090,7 @@ public class AgentLoopService {
         }
 
         // 超过最大步数，强制要求总结
-        String forceAnswer = chatModel.chat(
+        String forceAnswer = aiModelHolder.getChatModel().chat(
                 conversationHistory + "System: 已达到最大推理步数，请基于已有信息给出最终回答。\n\n");
         return AgentResult.of(extractBlock(forceAnswer, "Answer:") != null
                         ? extractBlock(forceAnswer, "Answer:") : forceAnswer,
@@ -1216,7 +1228,7 @@ flowchart TD
 |---|---|---|---|
 | 1 | `AgentStep.java` | 新增 | 单步推理记录模型 |
 | 2 | `ToolDispatcher.java` | 新增 | 工具分发 + 重试 + 容错 |
-| 3 | `AgentLoopService.java` | 新增 | 自定义 ReAct 推理循环 |
+| 3 | `AgentLoopService.java` | 新增 | 自定义 ReAct 推理循环（通过 `AiModelHolder` 获取模型） |
 | 4 | `ai_agent_trace_log` 表 | 新增 SQL | 决策链路日志表 |
 | 5 | `AgentTraceLog.java` + Mapper | 新增 | 日志实体和持久化 |
 | 6 | `AiChatServiceImpl.java` | 修改 | 根据配置切换 simple/advanced 模式 |

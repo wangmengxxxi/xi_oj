@@ -33,7 +33,7 @@ public class QuestionCommentServiceImpl extends ServiceImpl<QuestionCommentMappe
     private QuestionService questionService;
 
     @Resource
-    private StringRedisTemplate redisTemplate;
+    private StringRedisTemplate stringRedisTemplate;
 
     @Override
     public Long addComment(Long questionId, Long userId, String content, Long parentId) {
@@ -125,13 +125,13 @@ public class QuestionCommentServiceImpl extends ServiceImpl<QuestionCommentMappe
 
         String likeKey = COMMENT_LIKE_KEY_PREFIX + commentId;
         String userMember = String.valueOf(userId);
-        Long removed = redisTemplate.opsForSet().remove(likeKey, userMember);
+        Long removed = stringRedisTemplate.opsForSet().remove(likeKey, userMember);
         if (removed != null && removed > 0) {
             commentMapper.decrementLike(commentId);
             return false;
         }
 
-        Long added = redisTemplate.opsForSet().add(likeKey, userMember);
+        Long added = stringRedisTemplate.opsForSet().add(likeKey, userMember);
         if (added != null && added > 0) {
             commentMapper.incrementLike(commentId);
         }

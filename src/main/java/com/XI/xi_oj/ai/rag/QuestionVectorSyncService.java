@@ -1,17 +1,18 @@
 package com.XI.xi_oj.ai.rag;
 
+import com.XI.xi_oj.ai.agent.AiModelHolder;
 import com.XI.xi_oj.model.entity.Question;
 import com.XI.xi_oj.service.QuestionService;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import dev.langchain4j.data.document.Metadata;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
-import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.store.embedding.milvus.MilvusEmbeddingStore;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,7 +29,7 @@ public class QuestionVectorSyncService {
     private QuestionService questionService;  // 问题服务接口
 
     @Resource
-    private EmbeddingModel embeddingModel;  // 向量嵌入模型
+    private AiModelHolder aiModelHolder;
 
     @Resource(name = "questionEmbeddingStore")
     private MilvusEmbeddingStore questionEmbeddingStore;  // Milvus向量存储
@@ -48,23 +49,26 @@ public class QuestionVectorSyncService {
         log.info("[Question Vector] start rebuilding question vectors, count={}", questions.size());
         questionEmbeddingStore.removeAll();  // 清空现有向量存储
 
-        int success = 0;  // 成功计数器
-        int fail = 0;     // 失败计数器
-        // 遍历每个问题，构建并存储向量
+        List<Embedding> embeddings = new ArrayList<>();
+        List<TextSegment> segments = new ArrayList<>();
+        int fail = 0;
         for (Question question : questions) {
             try {
-                String vectorText = buildVectorText(question);  // 构建向量文本
-                Embedding embedding = embeddingModel.embed(vectorText).content();  // 生成向量
-                // 向向量存储中添加向量及其元数据
-                questionEmbeddingStore.add(embedding, TextSegment.from(vectorText, buildMetadata(question)));
-                success++;
+                String vectorText = buildVectorText(question);
+                Embedding embedding = aiModelHolder.getEmbeddingModel().embed(vectorText).content();
+                embeddings.add(embedding);
+                segments.add(TextSegment.from(vectorText, buildMetadata(question)));
             } catch (Exception e) {
                 fail++;
-                log.error("[Question Vector] sync failed, questionId={}", question.getId(), e);
+                log.error("[Question Vector] embed failed, questionId={}", question.getId(), e);
             }
         }
 
-        ojKnowledgeRetriever.clearRagCache();  // 清除RAG缓存
+        if (!embeddings.isEmpty()) {
+            questionEmbeddingStore.addAll(embeddings, segments);
+        }
+        ojKnowledgeRetriever.clearRagCache();
+        int success = embeddings.size();
         log.info("[Question Vector] rebuild finished, success={}, fail={}", success, fail);
         return success;
     }

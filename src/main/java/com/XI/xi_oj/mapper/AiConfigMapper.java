@@ -9,7 +9,7 @@ import org.apache.ibatis.annotations.Update;
 
 @Mapper
 public interface AiConfigMapper extends BaseMapper<AiConfig> {
-    @Select("SELECT * FROM ai_config WHERE config_key = #{configKey} LIMIT 1")
+    @Select("SELECT id, config_key AS configKey, config_value AS configValue, description, is_enable AS isEnable, createTime, updateTime FROM ai_config WHERE config_key = #{configKey} LIMIT 1")
     AiConfig selectByConfigKey(@Param("configKey") String configKey);
     @Update("UPDATE ai_config SET config_value = #{configValue}, updateTime = NOW() " +
             "WHERE config_key = #{configKey}")

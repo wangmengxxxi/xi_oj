@@ -1,5 +1,6 @@
 package com.XI.xi_oj.service.impl;
 
+import com.XI.xi_oj.ai.event.AiConfigChangedEvent;
 import com.XI.xi_oj.mapper.AiConfigMapper;
 import com.XI.xi_oj.model.entity.AiConfig;
 import com.XI.xi_oj.service.AiConfigService;
@@ -7,6 +8,7 @@ import com.XI.xi_oj.utils.TimeUtil;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -19,6 +21,9 @@ public class AiConfigServiceImpl extends ServiceImpl<AiConfigMapper, AiConfig> i
 
     @Autowired
     private StringRedisTemplate redisTemplate;
+
+    @Autowired
+    private ApplicationEventPublisher eventPublisher;
 
     private static final String CACHE_PREFIX = "ai:config:";
     private static final String NULL_PLACEHOLDER = "__NULL__";
@@ -33,7 +38,9 @@ public class AiConfigServiceImpl extends ServiceImpl<AiConfigMapper, AiConfig> i
         }
 
         AiConfig config = aiConfigMapper.selectByConfigKey(configKey);
-        if (config == null || config.getIsEnable() != 1) {
+        log.info("[AiConfig] query result for {}: config={}, isEnable={}",
+                configKey, config, config != null ? config.getIsEnable() : "N/A");
+        if (config == null || config.getIsEnable() == null || config.getIsEnable() != 1) {
             redisTemplate.opsForValue().set(cacheKey, NULL_PLACEHOLDER, TimeUtil.minutes(CACHE_TTL_MINUTES));
             log.warn("[AiConfig] config {} is missing or disabled", configKey);
             return null;
@@ -49,6 +56,7 @@ public class AiConfigServiceImpl extends ServiceImpl<AiConfigMapper, AiConfig> i
         aiConfigMapper.updateValueByKey(configKey, configValue);
         redisTemplate.delete(CACHE_PREFIX + configKey);
         log.info("[AiConfig] config {} updated and cache invalidated", configKey);
+        eventPublisher.publishEvent(new AiConfigChangedEvent(this, configKey));
     }
 
     @Override

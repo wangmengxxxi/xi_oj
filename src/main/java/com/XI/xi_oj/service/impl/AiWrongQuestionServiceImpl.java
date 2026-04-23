@@ -1,7 +1,7 @@
 package com.XI.xi_oj.service.impl;
 
 import cn.hutool.json.JSONUtil;
-import com.XI.xi_oj.ai.agent.OJStreamingService;
+import com.XI.xi_oj.ai.agent.AiModelHolder;
 import com.XI.xi_oj.ai.rag.OJKnowledgeRetriever;
 import com.XI.xi_oj.common.ErrorCode;
 import com.XI.xi_oj.exception.BusinessException;
@@ -13,7 +13,6 @@ import com.XI.xi_oj.model.entity.Question;
 import com.XI.xi_oj.service.AiConfigService;
 import com.XI.xi_oj.service.AiWrongQuestionService;
 import com.XI.xi_oj.service.QuestionService;
-import dev.langchain4j.model.chat.ChatLanguageModel;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -55,10 +54,7 @@ public class AiWrongQuestionServiceImpl implements AiWrongQuestionService {
     private OJKnowledgeRetriever ojKnowledgeRetriever;
 
     @Resource
-    private ChatLanguageModel chatModel;
-
-    @Resource
-    private OJStreamingService ojStreamingService;
+    private AiModelHolder aiModelHolder;
 
     @Override
     public List<WrongQuestionVO> listMyWrongQuestions(Long userId) {
@@ -81,7 +77,7 @@ public class AiWrongQuestionServiceImpl implements AiWrongQuestionService {
                 0.7
         );
         String prompt = buildPrompt(context, ragContext, formatSimilarQuestions(similarQuestionIds));
-        String answer = chatModel.chat(prompt);
+        String answer = aiModelHolder.getChatModel().chat(prompt);
         persistAnalysis(wrong, answer, similarQuestionIds);
         return answer;
     }
@@ -100,7 +96,7 @@ public class AiWrongQuestionServiceImpl implements AiWrongQuestionService {
         String prompt = buildPrompt(context, ragContext, formatSimilarQuestions(similarQuestionIds));
 
         StringBuilder buffer = new StringBuilder();
-        return ojStreamingService.stream(prompt)
+        return aiModelHolder.getOjStreamingService().stream(prompt)
                 .doOnNext(buffer::append)
                 .doOnComplete(() -> persistAnalysis(wrong, buffer.toString(), similarQuestionIds))
                 .doOnError(e -> log.error("[AI Wrong] stream analyze failed, wrongQuestionId={}", wrongQuestionId, e));

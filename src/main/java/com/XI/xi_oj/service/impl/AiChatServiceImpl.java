@@ -1,7 +1,7 @@
 package com.XI.xi_oj.service.impl;
 
 import cn.hutool.core.collection.CollUtil;
-import com.XI.xi_oj.ai.agent.OJChatAgent;
+import com.XI.xi_oj.ai.agent.AiModelHolder;
 import com.XI.xi_oj.ai.model.AiChatHistoryPageRequest;
 import com.XI.xi_oj.ai.model.AiChatHistoryPageResponse;
 import com.XI.xi_oj.ai.model.AiChatRecord;
@@ -22,7 +22,7 @@ import java.util.List;
 public class AiChatServiceImpl extends ServiceImpl<AiChatRecordMapper, AiChatRecord> implements AiChatService {
 
     @Resource
-    private OJChatAgent ojChatAgent;
+    private AiModelHolder aiModelHolder;
 
     @Resource
     private AiChatRecordMapper chatRecordMapper;
@@ -36,7 +36,7 @@ public class AiChatServiceImpl extends ServiceImpl<AiChatRecordMapper, AiChatRec
     @Override
     public String chat(String chatId, Long userId, String message) {
         String memoryId = buildMemoryId(userId, chatId);
-        String answer = ojChatAgent.chat(memoryId, message);
+        String answer = aiModelHolder.getOjChatAgent().chat(memoryId, message);
         saveRecord(userId, chatId, message, answer);
         return answer;
     }
@@ -45,7 +45,7 @@ public class AiChatServiceImpl extends ServiceImpl<AiChatRecordMapper, AiChatRec
     public Flux<String> chatStream(String chatId, Long userId, String message) {
         StringBuilder buffer = new StringBuilder();
         String memoryId = buildMemoryId(userId, chatId);
-        return ojChatAgent.chatStream(memoryId, message)
+        return aiModelHolder.getOjChatAgent().chatStream(memoryId, message)
                 .doOnNext(buffer::append)
                 .doOnComplete(() -> aiChatAsyncService.saveRecordAsync(userId, chatId, message, buffer.toString()))
                 .doOnError(e -> log.error("[AI Chat] stream failed, chatId={}", chatId, e));

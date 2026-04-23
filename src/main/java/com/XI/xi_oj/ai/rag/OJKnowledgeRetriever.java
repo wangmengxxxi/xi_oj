@@ -1,9 +1,9 @@
 package com.XI.xi_oj.ai.rag;
 
+import com.XI.xi_oj.ai.agent.AiModelHolder;
 import com.XI.xi_oj.utils.TimeUtil;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
-import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.store.embedding.EmbeddingMatch;
 import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
 import dev.langchain4j.store.embedding.EmbeddingSearchResult;
@@ -33,10 +33,10 @@ public class OJKnowledgeRetriever {
     private MilvusEmbeddingStore questionEmbeddingStore;
 
     @Resource
-    private EmbeddingModel embeddingModel;
+    private AiModelHolder aiModelHolder;
 
     @Resource
-    private StringRedisTemplate redisTemplate;
+    private StringRedisTemplate stringRedisTemplate;
 
     private static final String RAG_CACHE_PREFIX = "ai:rag:cache:";
     private static final long RAG_CACHE_TTL_MINUTES = 60;
@@ -44,18 +44,18 @@ public class OJKnowledgeRetriever {
     public String retrieve(String query, int topK, double minScore) {
         String cacheKey = RAG_CACHE_PREFIX + DigestUtils.md5DigestAsHex(
                 (query + "|" + topK + "|" + minScore).getBytes(StandardCharsets.UTF_8));
-        String cached = redisTemplate.opsForValue().get(cacheKey);
+        String cached = stringRedisTemplate.opsForValue().get(cacheKey);
         if (cached != null) {
             log.debug("[RAG Cache] HIT key={}", cacheKey);
             return cached;
         }
         String result = doRetrieve(query, topK, minScore);
-        redisTemplate.opsForValue().set(cacheKey, result, TimeUtil.minutes(RAG_CACHE_TTL_MINUTES));
+        stringRedisTemplate.opsForValue().set(cacheKey, result, TimeUtil.minutes(RAG_CACHE_TTL_MINUTES));
         return result;
     }
 
     private String doRetrieve(String query, int topK, double minScore) {
-        Embedding queryEmbedding = embeddingModel.embed(query).content();
+        Embedding queryEmbedding = aiModelHolder.getEmbeddingModel().embed(query).content();
         EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
                 .queryEmbedding(queryEmbedding)
                 .maxResults(topK)
@@ -84,7 +84,7 @@ public class OJKnowledgeRetriever {
         String cacheKey = RAG_CACHE_PREFIX + "similar:" + DigestUtils.md5DigestAsHex(
                 (questionId + "|" + questionContent + "|" + normalizedDifficulty).getBytes(StandardCharsets.UTF_8));
 
-        String cached = redisTemplate.opsForValue().get(cacheKey);
+        String cached = stringRedisTemplate.opsForValue().get(cacheKey);
         if (cached != null) {
             log.debug("[RAG Cache] HIT key={}", cacheKey);
             if (cached.isBlank()) {
@@ -99,12 +99,12 @@ public class OJKnowledgeRetriever {
         String toCache = result.stream()
                 .map(String::valueOf)
                 .collect(Collectors.joining(","));
-        redisTemplate.opsForValue().set(cacheKey, toCache, TimeUtil.minutes(RAG_CACHE_TTL_MINUTES));
+        stringRedisTemplate.opsForValue().set(cacheKey, toCache, TimeUtil.minutes(RAG_CACHE_TTL_MINUTES));
         return result;
     }
 
     private List<Long> doretrieveSimilarQuestions(Long questionId, String questionContent, String difficulty) {
-        Embedding queryEmbedding = embeddingModel.embed(questionContent).content();
+        Embedding queryEmbedding = aiModelHolder.getEmbeddingModel().embed(questionContent).content();
         EmbeddingSearchRequest embeddingSearchRequest = EmbeddingSearchRequest.builder()
                 .queryEmbedding(queryEmbedding)
                 .maxResults(8)
@@ -130,7 +130,7 @@ public class OJKnowledgeRetriever {
         String cacheKey = RAG_CACHE_PREFIX + "type:" + DigestUtils.md5DigestAsHex(
                 (query + "|" + contentTypes + "|" + topK + "|" + minScore).getBytes(StandardCharsets.UTF_8));
 
-        String cached = redisTemplate.opsForValue().get(cacheKey);
+        String cached = stringRedisTemplate.opsForValue().get(cacheKey);
         if (cached != null) {
             log.debug("[RAG Cache] HIT key={}", cacheKey);
             return cached;
@@ -150,12 +150,12 @@ public class OJKnowledgeRetriever {
                 .collect(Collectors.joining("\n\n"));
         result = result.isBlank() ? "无相关知识点" : result;
 
-        redisTemplate.opsForValue().set(cacheKey, result, TimeUtil.minutes(RAG_CACHE_TTL_MINUTES));
+        stringRedisTemplate.opsForValue().set(cacheKey, result, TimeUtil.minutes(RAG_CACHE_TTL_MINUTES));
         return result;
     }
 
     private List<EmbeddingMatch<TextSegment>> doretrieveByType(String query, int topK, double minScore) {
-        Embedding queryEmbedding = embeddingModel.embed(query).content();
+        Embedding queryEmbedding = aiModelHolder.getEmbeddingModel().embed(query).content();
         return embeddingStore.search(
                 EmbeddingSearchRequest.builder()
                         .queryEmbedding(queryEmbedding)
@@ -166,9 +166,9 @@ public class OJKnowledgeRetriever {
     }
 
     public void clearRagCache() {
-        Set<String> keys = redisTemplate.keys(RAG_CACHE_PREFIX + "*");
+        Set<String> keys = stringRedisTemplate.keys(RAG_CACHE_PREFIX + "*");
         if (keys != null && !keys.isEmpty()) {
-            redisTemplate.delete(keys);
+            stringRedisTemplate.delete(keys);
             log.info("[RAG Cache] 已清理 {} 条 RAG 缓存", keys.size());
         }
     }
