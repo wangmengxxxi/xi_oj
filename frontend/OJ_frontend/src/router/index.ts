@@ -71,6 +71,30 @@ const router = createRouter({
           meta: { requiresRole: 'admin' },
         },
         {
+          path: 'admin/ai-config',
+          name: 'adminAiConfig',
+          component: () => import('@/views/admin/AiConfigView.vue'),
+          meta: { requiresRole: 'admin' },
+        },
+        {
+          path: 'ai/chat',
+          name: 'aiChat',
+          component: () => import('@/views/ai/AiChatView.vue'),
+          meta: { requiresRole: 'user' },
+        },
+        {
+          path: 'ai/code-analysis',
+          name: 'aiCodeAnalysis',
+          component: () => import('@/views/ai/AiCodeAnalysisView.vue'),
+          meta: { requiresRole: 'user', hideInMenu: true },
+        },
+        {
+          path: 'ai/wrong-question',
+          name: 'aiWrongQuestion',
+          component: () => import('@/views/ai/AiWrongQuestionView.vue'),
+          meta: { requiresRole: 'user' },
+        },
+        {
           path: 'profile',
           name: 'profile',
           component: () => import('@/views/user/UserProfileView.vue'),

@@ -10,10 +10,10 @@ import type {
   Page,
 } from '@/types'
 
-export const getQuestionVOById = (id: number) =>
+export const getQuestionVOById = (id: number | string) =>
   request.get<BaseResponse<QuestionVO>>('/question/get/vo', { params: { id } })
 
-export const getQuestionById = (id: number) =>
+export const getQuestionById = (id: number | string) =>
   request.get<BaseResponse<Question>>('/question/get', { params: { id } })
 
 export const listQuestionVOByPage = (data: QuestionQueryRequest) =>

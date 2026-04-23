@@ -95,6 +95,11 @@
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j-milvus</artifactId>
         </dependency>
+        <!-- Reactor 支持（Flux<String> SSE 流式输出） -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-reactor</artifactId>
+        </dependency>
 
         <dependency>
             <groupId>com.alibaba.fastjson2</groupId>

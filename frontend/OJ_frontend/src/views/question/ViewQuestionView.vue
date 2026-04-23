@@ -7,10 +7,13 @@ import { doQuestionSubmit, listQuestionSubmitByPage } from '@/api/questionSubmit
 import type { QuestionVO, QuestionSubmitVO, JudgeInfo } from '@/types'
 import MdViewer from '@/components/MdViewer.vue'
 import CodeEditor from '@/components/CodeEditor.vue'
+import AiQuestionParse from '@/components/AiQuestionParse.vue'
+import QuestionComment from '@/components/QuestionComment.vue'
 
 const route = useRoute()
 const router = useRouter()
-const questionId = Number(route.params.id)
+const questionId = String(route.params.id)
+const leftTab = ref<'description' | 'comment'>('description')
 
 // ===== 题目数据 =====
 const question = ref<QuestionVO | null>(null)
@@ -68,6 +71,26 @@ func main() {
 
 const language = ref('java')
 const code = ref(CODE_TEMPLATES.java)
+
+async function loadLastSubmit() {
+  try {
+    const res = await listQuestionSubmitByPage({
+      questionId,
+      current: 1,
+      pageSize: 1,
+      sortField: 'createTime',
+      sortOrder: 'descend',
+    })
+    const records = res.data.data?.records ?? []
+    if (records.length > 0 && records[0].code) {
+      const last = records[0]
+      language.value = last.language || 'java'
+      code.value = last.code
+    }
+  } catch {
+    // 加载上次提交失败不影响正常使用
+  }
+}
 
 function handleLanguageChange(val: string) {
   if (code.value !== CODE_TEMPLATES[language.value]) {
@@ -266,6 +289,7 @@ function statusClass(status: number) {
 onMounted(() => {
   loadQuestion()
   loadRecentSubmits()
+  loadLastSubmit()
 })
 
 onUnmounted(() => {
@@ -280,49 +304,72 @@ onUnmounted(() => {
       <div v-if="question" class="split-layout">
         <!-- 左侧：题目信息 -->
         <div class="left-panel">
-          <!-- 题目标题和标签 -->
-          <div class="question-header">
-            <h1 class="question-title">{{ question.title }}</h1>
-            <div class="question-meta">
-              <a-space wrap>
-                <a-tag v-for="tag in question.tags" :key="tag" color="arcoblue" size="small">
-                  {{ tag }}
-                </a-tag>
-              </a-space>
-              <span class="meta-item">
-                提交 {{ question.submitNum }} &nbsp;|&nbsp; 通过 {{ question.acceptedNum }}
-              </span>
-            </div>
-          </div>
-
-          <!-- 题目描述 -->
-          <div class="question-content">
-            <MdViewer :content="question.content" />
-          </div>
-
-          <!-- 时间/内存限制 -->
-          <div class="judge-config">
-            <span>时间限制：{{ question.judgeConfig?.timeLimit ?? '-' }} ms</span>
-            <span>内存限制：{{ (question.judgeConfig?.memoryLimit ?? 0) / 1024 }} MB</span>
-          </div>
-
-          <!-- 最近提交记录 -->
-          <div class="recent-submits">
-            <div class="section-title">最近提交</div>
-            <div v-if="recentSubmits.length === 0" class="empty-hint">暂无提交记录</div>
-            <div
-              v-for="s in recentSubmits"
-              :key="s.id"
-              class="submit-row"
+          <!-- Tab 切换 -->
+          <div class="left-tabs">
+            <span
+              :class="['tab-item', { active: leftTab === 'description' }]"
+              @click="leftTab = 'description'"
             >
-              <span :class="['status-tag', statusClass(s.status)]">
-                {{ statusLabel(s.status) }}
-              </span>
-              <span class="submit-lang">{{ s.language }}</span>
-              <span v-if="s.judgeInfo?.time != null" class="submit-meta">{{ s.judgeInfo.time }}ms</span>
-              <span v-if="s.judgeInfo?.memory != null" class="submit-meta">{{ (s.judgeInfo.memory / 1024).toFixed(1) }}MB</span>
-            </div>
+              题目描述
+            </span>
+            <span
+              :class="['tab-item', { active: leftTab === 'comment' }]"
+              @click="leftTab = 'comment'"
+            >
+              评论区
+            </span>
           </div>
+
+          <!-- 题目描述 Tab -->
+          <template v-if="leftTab === 'description'">
+            <div class="question-header">
+              <h1 class="question-title">{{ question.title }}</h1>
+              <div class="question-meta">
+                <a-space wrap>
+                  <a-tag v-for="tag in question.tags" :key="tag" color="arcoblue" size="small">
+                    {{ tag }}
+                  </a-tag>
+                </a-space>
+                <span class="meta-item">
+                  提交 {{ question.submitNum }} &nbsp;|&nbsp; 通过 {{ question.acceptedNum }}
+                </span>
+              </div>
+            </div>
+
+            <div class="question-content">
+              <MdViewer :content="question.content" />
+            </div>
+
+            <!-- AI 题目解析 -->
+            <AiQuestionParse :question-id="questionId" />
+
+            <div class="judge-config">
+              <span>时间限制：{{ question.judgeConfig?.timeLimit ?? '-' }} ms</span>
+              <span>内存限制：{{ (question.judgeConfig?.memoryLimit ?? 0) / 1024 }} MB</span>
+            </div>
+
+            <div class="recent-submits">
+              <div class="section-title">最近提交</div>
+              <div v-if="recentSubmits.length === 0" class="empty-hint">暂无提交记录</div>
+              <div
+                v-for="s in recentSubmits"
+                :key="s.id"
+                class="submit-row"
+              >
+                <span :class="['status-tag', statusClass(s.status)]">
+                  {{ statusLabel(s.status) }}
+                </span>
+                <span class="submit-lang">{{ s.language }}</span>
+                <span v-if="s.judgeInfo?.time != null" class="submit-meta">{{ s.judgeInfo.time }}ms</span>
+                <span v-if="s.judgeInfo?.memory != null" class="submit-meta">{{ (s.judgeInfo.memory / 1024).toFixed(1) }}MB</span>
+              </div>
+            </div>
+          </template>
+
+          <!-- 评论区 Tab -->
+          <template v-if="leftTab === 'comment'">
+            <QuestionComment :question-id="questionId" />
+          </template>
         </div>
 
         <!-- 右侧：代码编辑区 -->
@@ -400,6 +447,13 @@ onUnmounted(() => {
                 <span v-if="judgeResult.submitVO.judgeInfo?.memory != null">
                   内存消耗：{{ (judgeResult.submitVO.judgeInfo.memory / 1024).toFixed(1) }} MB
                 </span>
+                <a-button
+                  type="text"
+                  size="small"
+                  @click="router.push(`/ai/code-analysis?questionId=${questionId}&questionSubmitId=${judgeResult.submitVO?.id}`)"
+                >
+                  AI 分析
+                </a-button>
               </div>
             </div>
           </div>
@@ -413,6 +467,33 @@ onUnmounted(() => {
 .view-question-page {
   height: calc(100vh - 104px);
   overflow: hidden;
+}
+
+.left-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid #ebebeb;
+  flex-shrink: 0;
+}
+
+.tab-item {
+  padding: 8px 16px;
+  font-size: 14px;
+  color: #595959;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s;
+}
+
+.tab-item:hover {
+  color: #262626;
+}
+
+.tab-item.active {
+  color: #ffa116;
+  border-bottom-color: #ffa116;
+  font-weight: 500;
 }
 
 .split-layout {

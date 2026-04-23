@@ -25,6 +25,8 @@ async function handleLogout() {
 const navItems = [
   { name: '浏览题目', path: '/questions' },
   { name: '提交记录', path: '/question_submit' },
+  { name: 'AI 助手', path: '/ai/chat' },
+  { name: '错题本', path: '/ai/wrong-question' },
   { name: '创建题目', path: '/add/question', requireLogin: true },
 ]
 </script>
@@ -70,6 +72,13 @@ const navItems = [
               active-class="nav-link-active"
             >
               限流配置
+            </router-link>
+            <router-link
+              to="/admin/ai-config"
+              class="nav-link"
+              active-class="nav-link-active"
+            >
+              AI 配置
             </router-link>
           </template>
         </nav>

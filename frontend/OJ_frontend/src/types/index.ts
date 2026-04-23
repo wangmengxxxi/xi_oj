@@ -182,3 +182,117 @@ export interface QuestionSubmitQueryRequest {
   sortField?: string
   sortOrder?: string
 }
+
+// ===== AI 问答 =====
+export interface AiChatRequest {
+  chatId: string
+  message: string
+}
+
+export interface AiChatClearRequest {
+  chatId: string
+}
+
+export interface AiChatRecord {
+  id: number
+  userId: number
+  question: string
+  answer: string
+  chatId: string
+  usedTokens: number
+  createTime: string
+}
+
+export interface AiChatHistoryPageRequest {
+  chatId: string
+  cursorTime?: string
+  cursorId?: number
+  pageSize?: number
+}
+
+export interface AiChatHistoryPageResponse {
+  records: AiChatRecord[]
+  nextCursorTime?: string
+  nextCursorId?: number
+}
+
+// ===== AI 代码分析 =====
+export interface AiCodeAnalysisRequest {
+  questionId: number
+  questionSubmitId?: number
+  code?: string
+  language?: string
+  judgeStatus?: string
+  errorMsg?: string
+}
+
+export interface AiCodeAnalysis {
+  id: number
+  userId: number
+  questionId: number
+  code: string
+  language: string
+  analysisResult: string
+  score: number
+  judgeResult: string
+  createTime: string
+}
+
+// ===== AI 题目解析 =====
+export interface AiQuestionParseRequest {
+  questionId: number
+}
+
+export interface AiQuestionParseResponse {
+  questionId: number
+  analysis: string
+  similarQuestionIds: number[]
+}
+
+// ===== AI 错题本 =====
+export interface WrongQuestionVO {
+  id: number
+  userId: number
+  questionId: number
+  wrongCode: string
+  wrongJudgeResult: string
+  wrongAnalysis: string
+  reviewCount: number
+  isReviewed: number
+}
+
+export interface WrongQuestionReviewRequest {
+  wrongQuestionId: number
+}
+
+// ===== 评论 =====
+export interface CommentVO {
+  id: number
+  questionId: number
+  userId: number
+  content: string
+  parentId: number
+  likeNum: number
+  createTime: string
+  replies: CommentVO[]
+}
+
+export interface CommentAddRequest {
+  questionId: number
+  content: string
+  parentId?: number
+}
+
+export interface CommentLikeRequest {
+  commentId: number
+}
+
+export interface CommentDeleteRequest {
+  commentId: number
+}
+
+// ===== AI 配置 (admin) =====
+export interface AiConfigUpdateRequest {
+  configKey: string
+  configValue: string
+}

@@ -11,7 +11,8 @@
       "Bash(python3 -c ':*)",
       "Bash(python3)",
       "WebFetch(domain:docs.langchain4j.dev)",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "mcp__ide__getDiagnostics"
     ]
   }
 }
