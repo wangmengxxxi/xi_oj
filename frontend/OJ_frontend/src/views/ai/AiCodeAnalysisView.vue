@@ -3,7 +3,7 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
 import { getQuestionVOById } from '@/api/question'
-import { getAiCodeHistory } from '@/api/ai'
+import { getAiCodeHistory, getAiSimilarQuestions } from '@/api/ai'
 import { listQuestionSubmitByPage } from '@/api/questionSubmit'
 import { fetchSSE } from '@/utils/sse'
 import type { QuestionVO, AiCodeAnalysis } from '@/types'
@@ -23,6 +23,7 @@ const historyList = ref<AiCodeAnalysis[]>([])
 const historyLoading = ref(false)
 const selectedCode = ref('')
 const selectedLanguage = ref('')
+const similarIds = ref<number[]>([])
 let sseController: AbortController | null = null
 
 async function loadQuestion() {
@@ -80,6 +81,7 @@ function startAnalysis() {
     onDone() {
       analyzing.value = false
       loadHistory()
+      loadSimilar()
     },
     onError(msg) {
       analyzing.value = false
@@ -115,6 +117,20 @@ function viewHistory(item: AiCodeAnalysis) {
   selectedCode.value = item.code
   selectedLanguage.value = item.language
   analysisResult.value = item.analysisResult
+  loadSimilar()
+}
+
+async function loadSimilar() {
+  try {
+    const res = await getAiSimilarQuestions(questionId)
+    similarIds.value = res.data.data ?? []
+  } catch {
+    // 相似题目加载失败不影响主流程
+  }
+}
+
+function goToQuestion(id: number) {
+  router.push(`/view/question/${id}`)
 }
 
 onMounted(async () => {
@@ -196,6 +212,20 @@ onUnmounted(() => { if (sseController) sseController.abort() })
             <a-spin v-if="analyzing && !analysisResult" />
             <MdViewer v-else-if="analysisResult" :content="analysisResult" />
             <div v-else class="empty-hint">点击「重新分析」开始 AI 代码分析</div>
+          </div>
+          <div v-if="similarIds.length > 0" class="similar-section">
+            <div class="similar-title">相似题目推荐</div>
+            <div class="similar-list">
+              <a-tag
+                v-for="id in similarIds"
+                :key="id"
+                color="arcoblue"
+                class="similar-tag"
+                @click="goToQuestion(id)"
+              >
+                题目 #{{ id }}
+              </a-tag>
+            </div>
           </div>
         </div>
       </div>
@@ -314,5 +344,32 @@ onUnmounted(() => { if (sseController) sseController.abort() })
   font-size: 14px;
   text-align: center;
   padding: 40px 0;
+}
+
+.similar-section {
+  border-top: 1px solid #f0f0f0;
+  padding-top: 12px;
+  flex-shrink: 0;
+}
+
+.similar-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: #262626;
+  margin-bottom: 8px;
+}
+
+.similar-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.similar-tag {
+  cursor: pointer;
+}
+
+.similar-tag:hover {
+  opacity: 0.8;
 }
 </style>

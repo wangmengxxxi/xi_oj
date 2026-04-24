@@ -7,10 +7,7 @@ import com.XI.xi_oj.ai.model.AiChatHistoryPageResponse;
 import com.XI.xi_oj.ai.model.AiChatRecord;
 import com.XI.xi_oj.ai.store.AiChatRecordMapper;
 import com.XI.xi_oj.ai.tools.OJTools;
-import com.XI.xi_oj.model.dto.question.JudgeConfig;
-import com.XI.xi_oj.model.entity.Question;
 import com.XI.xi_oj.service.AiChatService;
-import com.XI.xi_oj.service.QuestionService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import dev.langchain4j.store.memory.chat.ChatMemoryStore;
 import jakarta.annotation.Resource;
@@ -20,6 +17,7 @@ import reactor.core.publisher.Flux;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 
 @Service
 @Slf4j
@@ -37,9 +35,6 @@ public class AiChatServiceImpl extends ServiceImpl<AiChatRecordMapper, AiChatRec
     @Resource
     private AiChatAsyncService aiChatAsyncService;
 
-    @Resource
-    private QuestionService questionService;
-
     @Override
     public String chat(String chatId, Long userId, String message) {
         return chat(chatId, userId, message, null);
@@ -48,7 +43,7 @@ public class AiChatServiceImpl extends ServiceImpl<AiChatRecordMapper, AiChatRec
     @Override
     public String chat(String chatId, Long userId, String message, Long questionId) {
         String memoryId = buildMemoryId(userId, chatId);
-        String enrichedMessage = buildContextualMessage(questionId, message);
+        String enrichedMessage = buildContextualMessage(questionId, userId, message);
         OJTools.setCurrentUserId(userId);
         try {
             String answer = aiModelHolder.getOjChatAgent().chat(memoryId, enrichedMessage);
@@ -68,7 +63,7 @@ public class AiChatServiceImpl extends ServiceImpl<AiChatRecordMapper, AiChatRec
     public Flux<String> chatStream(String chatId, Long userId, String message, Long questionId) {
         StringBuilder buffer = new StringBuilder();
         String memoryId = buildMemoryId(userId, chatId);
-        String enrichedMessage = buildContextualMessage(questionId, message);
+        String enrichedMessage = buildContextualMessage(questionId, userId, message);
         OJTools.setCurrentUserId(userId);
         return aiModelHolder.getOjChatAgent().chatStream(memoryId, enrichedMessage)
                 .doOnNext(buffer::append)
@@ -114,40 +109,24 @@ public class AiChatServiceImpl extends ServiceImpl<AiChatRecordMapper, AiChatRec
         log.info("[AI Chat] history cleared, userId={}, chatId={}", userId, chatId);
     }
 
-    private String buildContextualMessage(Long questionId, String message) {
-        if (questionId == null) {
+    @Override
+    public List<Map<String, Object>> listSessions(Long userId) {
+        return chatRecordMapper.selectSessionsByUser(userId);
+    }
+
+    private String buildContextualMessage(Long questionId, Long userId, String message) {
+        if (questionId == null && userId == null) {
             return message;
         }
-        try {
-            Question question = questionService.getById(questionId);
-            if (question == null) {
-                return message;
-            }
-            String timeLimit = "-";
-            String memoryLimit = "-";
-            if (question.getJudgeConfig() != null) {
-                try {
-                    JudgeConfig jc = cn.hutool.json.JSONUtil.toBean(question.getJudgeConfig(), JudgeConfig.class);
-                    if (jc.getTimeLimit() != null) timeLimit = jc.getTimeLimit() + "ms";
-                    if (jc.getMemoryLimit() != null) memoryLimit = jc.getMemoryLimit() + "KB";
-                } catch (Exception ignored) {}
-            }
-            return String.format("""
-                    【当前题目上下文】
-                    题目ID：%s
-                    标题：%s
-                    题干：%s
-                    标签：%s
-                    时间限制：%s
-                    内存限制：%s
-                    ---
-                    用户问题：%s""",
-                    question.getId(), question.getTitle(), question.getContent(),
-                    question.getTags(), timeLimit, memoryLimit, message);
-        } catch (Exception e) {
-            log.warn("[AI Chat] failed to load question context, questionId={}", questionId, e);
-            return message;
+        StringBuilder prefix = new StringBuilder("【上下文信息】");
+        if (userId != null) {
+            prefix.append(String.format("当前用户ID：%d。", userId));
         }
+        if (questionId != null) {
+            prefix.append(String.format("当前题目ID：%d。", questionId));
+        }
+        prefix.append("请根据需要调用工具获取题目信息、用户提交记录或错题记录。\n");
+        return prefix.toString() + message;
     }
 
     private void saveRecord(Long userId, String chatId, String question, String answer) {

@@ -6,6 +6,7 @@ import com.XI.xi_oj.ai.model.AiChatRecord;
 import reactor.core.publisher.Flux;
 
 import java.util.List;
+import java.util.Map;
 
 public interface AiChatService {
 
@@ -22,4 +23,6 @@ public interface AiChatService {
     List<AiChatRecord> getChatHistory(Long userId, String chatId);
 
     void clearHistory(Long userId, String chatId);
+
+    List<Map<String, Object>> listSessions(Long userId);
 }

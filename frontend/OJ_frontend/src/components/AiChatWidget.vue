@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onUnmounted } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { getAiChatHistory, clearAiChat } from '@/api/ai'
 import { fetchSSE } from '@/utils/sse'
@@ -27,6 +27,51 @@ const rateLimitMsg = ref('')
 const chatAreaRef = ref<HTMLElement | null>(null)
 let sseController: AbortController | null = null
 let historyLoaded = false
+
+// ===== 拖拽 =====
+const panelX = ref(0)
+const panelY = ref(0)
+const dragging = ref(false)
+let dragStartX = 0
+let dragStartY = 0
+let dragOriginX = 0
+let dragOriginY = 0
+
+const PANEL_W = 500
+const PANEL_H = 640
+
+function initPosition() {
+  panelX.value = window.innerWidth - PANEL_W - 24
+  panelY.value = window.innerHeight - PANEL_H - 24
+}
+
+function onDragStart(e: MouseEvent) {
+  dragging.value = true
+  dragStartX = e.clientX
+  dragStartY = e.clientY
+  dragOriginX = panelX.value
+  dragOriginY = panelY.value
+  document.addEventListener('mousemove', onDragMove)
+  document.addEventListener('mouseup', onDragEnd)
+}
+
+function onDragMove(e: MouseEvent) {
+  if (!dragging.value) return
+  let nx = dragOriginX + (e.clientX - dragStartX)
+  let ny = dragOriginY + (e.clientY - dragStartY)
+  nx = Math.max(0, Math.min(nx, window.innerWidth - PANEL_W))
+  ny = Math.max(0, Math.min(ny, window.innerHeight - PANEL_H))
+  panelX.value = nx
+  panelY.value = ny
+}
+
+function onDragEnd() {
+  dragging.value = false
+  document.removeEventListener('mousemove', onDragMove)
+  document.removeEventListener('mouseup', onDragEnd)
+}
+
+onMounted(() => initPosition())
 
 function scrollToBottom() {
   nextTick(() => {
@@ -118,6 +163,7 @@ function handleKeydown(e: KeyboardEvent) {
 function toggleExpand() {
   expanded.value = !expanded.value
   if (expanded.value) {
+    initPosition()
     loadHistory()
   }
 }
@@ -133,16 +179,25 @@ watch(() => props.questionId, () => {
   }
 })
 
-onUnmounted(() => { if (sseController) sseController.abort() })
+onUnmounted(() => {
+  if (sseController) sseController.abort()
+  document.removeEventListener('mousemove', onDragMove)
+  document.removeEventListener('mouseup', onDragEnd)
+})
 </script>
 <template>
   <div class="ai-chat-widget">
     <div v-if="!expanded" class="chat-fab" @click="toggleExpand">AI</div>
 
-    <div v-else class="chat-panel">
-      <div class="chat-header">
+    <div
+      v-else
+      class="chat-panel"
+      :class="{ 'is-dragging': dragging }"
+      :style="{ left: panelX + 'px', top: panelY + 'px' }"
+    >
+      <div class="chat-header" @mousedown.prevent="onDragStart">
         <span class="chat-title">AI 助手</span>
-        <div class="chat-header-actions">
+        <div class="chat-header-actions" @mousedown.stop>
           <a-button size="mini" type="text" @click="handleClear">清空</a-button>
           <a-button size="mini" type="text" @click="toggleExpand">收起</a-button>
         </div>
@@ -193,6 +248,11 @@ onUnmounted(() => { if (sseController) sseController.abort() })
   bottom: 24px;
   right: 24px;
   z-index: 1000;
+  pointer-events: none;
+}
+
+.chat-fab, .chat-panel {
+  pointer-events: auto;
 }
 
 .chat-fab {
@@ -217,14 +277,20 @@ onUnmounted(() => { if (sseController) sseController.abort() })
 }
 
 .chat-panel {
-  width: 380px;
-  height: 520px;
+  width: 500px;
+  height: 640px;
+  position: fixed;
   background: #fff;
   border-radius: 12px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.chat-panel.is-dragging {
+  user-select: none;
+  transition: none;
 }
 
 .chat-header {
@@ -234,6 +300,11 @@ onUnmounted(() => { if (sseController) sseController.abort() })
   padding: 10px 14px;
   border-bottom: 1px solid #f0f0f0;
   flex-shrink: 0;
+  cursor: grab;
+}
+
+.chat-panel.is-dragging .chat-header {
+  cursor: grabbing;
 }
 
 .chat-title {
@@ -293,11 +364,11 @@ onUnmounted(() => { if (sseController) sseController.abort() })
 }
 
 .msg-bubble {
-  max-width: 80%;
-  padding: 8px 12px;
+  max-width: 85%;
+  padding: 10px 14px;
   border-radius: 10px;
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 14px;
+  line-height: 1.6;
   word-break: break-word;
 }
 

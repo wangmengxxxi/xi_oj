@@ -653,15 +653,25 @@ private Date calcNextReviewTime(int reviewCount) {
 
 | 工具名 | 功能 | 参数 | 调用链路 | 仅限 Agent |
 |---|---|---|---|---|
-| `query_question_info` | 按关键词/ID 查题 | `keyword` | `QuestionService.getByKeyword()` | OJChatAgent |
-| `judge_user_code` | 提交代码判题 | `questionId, code, language`（userId 由 ThreadLocal 注入） | `AiJudgeService.submitCode()` | OJChatAgent |
-| `query_user_wrong_question` | 查用户错题记录 | `questionId`（userId 由 ThreadLocal 注入） | `WrongQuestionService.getByUserAndQuestion()` | OJChatAgent |
+| `query_question_info` | 按关键词/ID 查单道题详情 | `keyword` | `QuestionService.getByKeyword()` | OJChatAgent |
+| `judge_user_code` | 提交代码判题 | `questionId, code, language`（userId 由 ThreadLocal/参数双重解析） | `AiJudgeService.submitCode()` | OJChatAgent |
+| `query_user_wrong_question` | 按题目ID查用户单条错题记录 | `userId, questionId`（userId 由 ThreadLocal/参数双重解析） | `WrongQuestionService.getByUserAndQuestion()` | OJChatAgent |
+| `search_questions` | 按关键词/标签/难度搜索题目列表 | `keyword, tag, difficulty`（均可选） | `QuestionService.getQueryWrapper()` + `page()` | OJChatAgent |
+| `find_similar_questions` | 按题目ID查找向量相似题目 | `questionId` | `OJKnowledgeRetriever.retrieveSimilarQuestions()` + `QuestionService.listByIds()` | OJChatAgent |
+| `list_user_wrong_questions` | 列出用户所有错题 | `userId`（由 ThreadLocal/参数双重解析） | `AiWrongQuestionService.listMyWrongQuestions()` | OJChatAgent |
+| `query_user_submit_history` | 查询用户提交记录 | `userId, questionId`（questionId 可选） | `QuestionSubmitService.getQueryWrapper()` + `page()` | OJChatAgent |
 
-### 11.2 userId 安全注入（ThreadLocal）
+### 11.2 userId 安全注入（ThreadLocal + 参数双重解析）
 
-`judge_user_code` 和 `query_user_wrong_question` 需要 `userId` 来标识当前用户。早期设计将 `userId` 作为工具参数由模型填写，存在安全隐患（模型可能幻觉出错误的 userId）。
+`judge_user_code`、`query_user_wrong_question`、`list_user_wrong_questions`、`query_user_submit_history` 需要 `userId` 来标识当前用户。早期设计将 `userId` 作为工具参数由模型填写，存在安全隐患（模型可能幻觉出错误的 userId）。
 
-当前方案：`OJTools` 内部维护 `ThreadLocal<Long> CURRENT_USER_ID`，由 `AiChatServiceImpl` 在调用 Agent 前设置、调用后清理：
+当前方案采用双重解析：工具方法同时接受参数传入的 userId 和 ThreadLocal 中的 userId，优先使用参数值（流式场景下 ThreadLocal 跨线程失效时由模型从上下文信息中获取），ThreadLocal 作为同步调用的兜底：
+
+```java
+Long resolvedUserId = userId != null ? userId : CURRENT_USER_ID.get();
+```
+
+`AiChatServiceImpl` 在调用 Agent 前设置、调用后清理：
 
 ```java
 OJTools.setCurrentUserId(userId);
@@ -1170,7 +1180,8 @@ return aiChatService.chatStream(chatId, loginUser.getId(), message)
 | 优化项 | 描述 | 优先级 | 状态 |
 |---|---|---|---|
 | 题目页上下文对话小窗 | 做题页嵌入悬浮 AI 对话，自动注入题目上下文，Agent 工具自然触发 | P0 | ✅ 已完成 |
-| OJTools userId 安全注入 | 工具参数中的 userId 改为 ThreadLocal 注入，防止模型幻觉 | P0 | ✅ 已完成 |
+| OJTools userId 安全注入 | 工具参数中的 userId 改为 ThreadLocal + 参数双重解析，防止模型幻觉 | P0 | ✅ 已完成 |
+| OJTools 工具扩展（3→7） | 新增 search_questions、find_similar_questions、list_user_wrong_questions、query_user_submit_history 四个工具，覆盖题目搜索、相似推荐、错题列表、提交记录查询场景 | P0 | ✅ 已完成 |
 | 错题复习提醒 | 基于 `nextReviewTime` 的定时提醒推送 | P1 | 待开发 |
 | 学习看板 | 错题趋势、复习进度、AI 使用统计可视化 | P2 | 待开发 |
 | 知识库增量同步 | 题目新增/修改时增量更新向量，替代全量重建 | P1 | 待开发 |

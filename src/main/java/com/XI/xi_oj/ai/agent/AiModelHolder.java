@@ -190,7 +190,7 @@ public class AiModelHolder {
                 .apiKey(apiKey)
                 .modelName(modelName)
                 .temperature(0.2f)
-                .maxTokens(2048)
+                .maxTokens(4096)
                 .build();
     }
 
@@ -204,7 +204,7 @@ public class AiModelHolder {
                 .apiKey(apiKey)
                 .modelName(modelName)
                 .temperature(0.2f)
-                .maxTokens(2048)
+                .maxTokens(4096)
                 .build();
     }
 
@@ -251,12 +251,49 @@ public class AiModelHolder {
      * 构建聊天代理
      * @return OJChatAgent 构建好的聊天代理
      */
+    private static final String DEFAULT_CHAT_SYSTEM_PROMPT = """
+            你是XI OJ平台的智能编程助教，严格遵循以下规则：
+            1. 仅回答编程、算法、OJ题目相关问题，无关问题直接拒绝；
+            2. 分析代码或错题时，先指出错误、再给出改进思路，不直接提供完整可运行的标准答案；
+            3. 解题讲解需分步骤，适配新手学习节奏，结合RAG提供的知识点进行说明；
+            4. 回答语言为中文，格式清晰，重点突出。
+            【可用工具】你可以调用以下工具获取信息或执行操作：
+            - query_question_info：按ID或关键词查询单道题目的详细信息
+            - search_questions：按关键词、标签、难度搜索题目列表（如"查找动态规划相关题目"）
+            - find_similar_questions：按题目ID查找相似题目（基于向量相似度）
+            - judge_user_code：提交代码执行判题
+            - query_user_wrong_question：按题目ID查询用户的错题记录
+            - list_user_wrong_questions：列出用户的所有错题
+            - query_user_submit_history：查询用户的代码提交记录
+            【思考规范 - ReAct模式】：收到问题后，先明确：我需要哪些信息？是否需要调用工具？
+            若需调用工具，等工具返回结果后再基于结果决策下一步，不要在工具返回前跳到结论。
+            """;
+
+    private static final String DEFAULT_PARSE_SYSTEM_PROMPT = """
+            你是XI OJ平台的题目解析助手，请对以下题目进行结构化分析：
+            1. 考点分析：涉及哪些算法与数据结构；
+            2. 分步骤解题思路，引导用户独立思考；
+            3. 常见易错点与边界情况。
+            回答格式结构清晰，语言通俗，适配编程初学者。总字数控制在500字以内。
+            """;
+
     private OJChatAgent buildChatAgent() {
+        java.lang.reflect.Method[] toolMethods = java.util.Arrays.stream(ojTools.getClass().getMethods())
+                .filter(m -> m.isAnnotationPresent(dev.langchain4j.agent.tool.Tool.class))
+                .toArray(java.lang.reflect.Method[]::new);
+        log.info("[AiModelHolder] OJTools registered {} @Tool methods: {}",
+                toolMethods.length,
+                java.util.Arrays.stream(toolMethods)
+                        .map(m -> m.getAnnotation(dev.langchain4j.agent.tool.Tool.class).name())
+                        .collect(java.util.stream.Collectors.joining(", ")));
+
         return AiServices.builder(OJChatAgent.class)
                 .chatLanguageModel(this.chatModel)
                 .streamingChatLanguageModel(this.streamingChatModel)
                 .tools(ojTools)
                 .contentRetriever(buildRetriever())
+                .systemMessageProvider(memoryId ->
+                        aiConfigService.getPrompt("ai.prompt.chat_system", DEFAULT_CHAT_SYSTEM_PROMPT))
                 .chatMemoryProvider(memoryId ->
                         dev.langchain4j.memory.chat.MessageWindowChatMemory.builder()
                                 .id(memoryId)
@@ -266,15 +303,13 @@ public class AiModelHolder {
                 .build();
     }
 
-    /**
-     * 构建问题解析代理
-     * @return OJQuestionParseAgent 构建好的问题解析代理
-     */
     private OJQuestionParseAgent buildQuestionParseAgent() {
         return AiServices.builder(OJQuestionParseAgent.class)
                 .chatLanguageModel(this.chatModel)
                 .streamingChatLanguageModel(this.streamingChatModel)
                 .contentRetriever(buildRetriever())
+                .systemMessageProvider(memoryId ->
+                        aiConfigService.getPrompt("ai.prompt.question_parse", DEFAULT_PARSE_SYSTEM_PROMPT))
                 .build();
     }
 

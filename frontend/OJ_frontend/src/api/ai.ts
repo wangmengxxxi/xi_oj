@@ -27,6 +27,9 @@ export const getAiChatHistoryPage = (data: AiChatHistoryPageRequest) =>
 export const clearAiChat = (data: AiChatClearRequest) =>
   request.post<BaseResponse<string>>('/ai/chat/clear', data)
 
+export const getAiChatSessions = () =>
+  request.get<BaseResponse<{ chatId: string; label: string; lastTime: string }[]>>('/ai/chat/sessions')
+
 // ===== AI Code Analysis =====
 export const aiCodeAnalysis = (data: AiCodeAnalysisRequest) =>
   request.post<BaseResponse<string>>('/ai/code/analysis', data)

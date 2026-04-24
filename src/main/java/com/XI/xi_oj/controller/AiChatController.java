@@ -96,6 +96,12 @@ public class AiChatController {
         return ResultUtils.success("会话历史已清空");
     }
 
+    @GetMapping("/chat/sessions")
+    public BaseResponse<List<Map<String, Object>>> listSessions(HttpServletRequest httpRequest) {
+        User loginUser = userService.getLoginUser(httpRequest);
+        return ResultUtils.success(aiChatService.listSessions(loginUser.getId()));
+    }
+
     private Map<String, Object> singletonPayload(String key, Object value) {
         Map<String, Object> payload = new HashMap<>(1);
         payload.put(key, value);

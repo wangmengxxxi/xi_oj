@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, reactive, nextTick, onMounted, onUnmounted } from 'vue'
 import { Message } from '@arco-design/web-vue'
-import { getAiChatHistory, clearAiChat } from '@/api/ai'
+import { getAiChatHistory, clearAiChat, getAiChatSessions } from '@/api/ai'
 import { fetchSSE } from '@/utils/sse'
 import type { AiChatRecord } from '@/types'
 import MdViewer from '@/components/MdViewer.vue'
@@ -12,10 +12,8 @@ interface ChatMessage {
   loading?: boolean
 }
 
-const chatId = ref('chat_' + Date.now())
-const sessions = reactive<{ id: string; label: string }[]>([
-  { id: chatId.value, label: '新会话' },
-])
+const chatId = ref('')
+const sessions = reactive<{ id: string; label: string }[]>([])
 const messages = ref<ChatMessage[]>([])
 const inputText = ref('')
 const sending = ref(false)
@@ -23,6 +21,29 @@ const historyLoading = ref(false)
 const rateLimitMsg = ref('')
 const chatAreaRef = ref<HTMLElement | null>(null)
 let sseController: AbortController | null = null
+
+function truncateLabel(text: string, max = 20) {
+  return text.length > max ? text.slice(0, max) + '...' : text
+}
+
+async function loadSessions() {
+  try {
+    const res = await getAiChatSessions()
+    const list = res.data.data ?? []
+    sessions.length = 0
+    for (const s of list) {
+      sessions.push({ id: s.chatId, label: truncateLabel(s.label || s.chatId) })
+    }
+    if (sessions.length > 0) {
+      chatId.value = sessions[0].id
+      loadHistory()
+    } else {
+      handleNewSession()
+    }
+  } catch {
+    handleNewSession()
+  }
+}
 
 function scrollToBottom() {
   nextTick(() => {
@@ -55,6 +76,11 @@ async function loadHistory() {
 function handleSend() {
   const text = inputText.value.trim()
   if (!text || sending.value) return
+
+  const session = sessions.find(s => s.id === chatId.value)
+  if (session && session.label === '新会话') {
+    session.label = truncateLabel(text)
+  }
 
   rateLimitMsg.value = ''
   messages.value.push({ role: 'user', content: text })
@@ -97,6 +123,14 @@ async function handleClear() {
   try {
     await clearAiChat({ chatId: chatId.value })
     messages.value = []
+    const idx = sessions.findIndex(s => s.id === chatId.value)
+    if (idx !== -1) sessions.splice(idx, 1)
+    if (sessions.length > 0) {
+      chatId.value = sessions[0].id
+      loadHistory()
+    } else {
+      handleNewSession()
+    }
     Message.success('会话已清空')
   } catch (err: any) {
     Message.error(err?.message || '清空失败')
@@ -107,7 +141,7 @@ function handleNewSession() {
   if (sseController) { sseController.abort(); sseController = null }
   sending.value = false
   const newId = 'chat_' + Date.now()
-  sessions.push({ id: newId, label: `会话 ${sessions.length + 1}` })
+  sessions.unshift({ id: newId, label: '新会话' })
   chatId.value = newId
   messages.value = []
   rateLimitMsg.value = ''
@@ -129,7 +163,7 @@ function handleKeydown(e: KeyboardEvent) {
   }
 }
 
-onMounted(() => loadHistory())
+onMounted(() => loadSessions())
 onUnmounted(() => { if (sseController) sseController.abort() })
 </script>
 

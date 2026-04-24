@@ -35,7 +35,9 @@ public class AiConfigController {
             "ai.model.name", "ai.model.base_url", "ai.model.embedding_name",
             "ai.rag.top_k", "ai.rag.similarity_threshold",
             // Prompt 动态管理配置项（对应 5.2 代码分析 / 5.4 题目解析 / 5.5 错题分析）
-            "ai.prompt.code_analysis", "ai.prompt.wrong_analysis", "ai.prompt.question_parse"
+            "ai.prompt.code_analysis", "ai.prompt.wrong_analysis", "ai.prompt.question_parse",
+            // SystemMessage 动态管理（对应 5.3 AI问答 Agent 系统提示词）
+            "ai.prompt.chat_system"
     );
     /** 获取所有可读 AI 配置（过滤敏感项） */
     @GetMapping("/config")

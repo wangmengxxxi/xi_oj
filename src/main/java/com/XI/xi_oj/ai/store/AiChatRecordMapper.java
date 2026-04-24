@@ -9,6 +9,7 @@ import org.apache.ibatis.annotations.Select;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 
 @Mapper
 public interface AiChatRecordMapper extends BaseMapper<AiChatRecord> {
@@ -58,4 +59,13 @@ public interface AiChatRecordMapper extends BaseMapper<AiChatRecord> {
 
     @Delete("DELETE FROM ai_chat_record WHERE user_id = #{userId} AND chat_id = #{chatId}")
     int deleteByUserAndChat(@Param("userId") Long userId, @Param("chatId") String chatId);
+
+    @Select("SELECT chat_id AS chatId, " +
+            "MIN(question) AS label, " +
+            "MAX(createTime) AS lastTime " +
+            "FROM ai_chat_record " +
+            "WHERE user_id = #{userId} " +
+            "GROUP BY chat_id " +
+            "ORDER BY lastTime DESC")
+    List<Map<String, Object>> selectSessionsByUser(@Param("userId") Long userId);
 }
