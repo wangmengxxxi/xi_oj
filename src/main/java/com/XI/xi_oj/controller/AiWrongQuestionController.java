@@ -53,6 +53,12 @@ public class AiWrongQuestionController {
         return ResultUtils.success(aiWrongQuestionService.listMyWrongQuestions(loginUser.getId()));
     }
 
+    @GetMapping("/due")
+    public BaseResponse<List<WrongQuestionVO>> listDueReviewQuestions(HttpServletRequest request) {
+        User loginUser = userService.getLoginUser(request);
+        return ResultUtils.success(aiWrongQuestionService.listDueReviewQuestions(loginUser.getId()));
+    }
+
     @RateLimit(types = {AI_USER_MINUTE, AI_IP_MINUTE, AI_WRONG_USER_DAY},
             message = "AI错题分析调用过于频繁，请稍后再试")
     @GetMapping("/analysis")

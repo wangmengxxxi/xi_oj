@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Message, Modal } from '@arco-design/web-vue'
-import { getWrongQuestionList, reviewWrongQuestion } from '@/api/ai'
+import { getDueWrongQuestionList, getWrongQuestionList, reviewWrongQuestion } from '@/api/ai'
 import { getQuestionVOById } from '@/api/question'
 import { fetchSSE } from '@/utils/sse'
 import type { WrongQuestionVO } from '@/types'
@@ -11,6 +11,7 @@ import MdViewer from '@/components/MdViewer.vue'
 const router = useRouter()
 const loading = ref(false)
 const wrongList = ref<WrongQuestionVO[]>([])
+const dueList = ref<WrongQuestionVO[]>([])
 const filterType = ref('')
 const questionTitleMap = ref<Record<string, string>>({})
 
@@ -30,9 +31,13 @@ const filteredList = computed(() => {
 async function loadList() {
   loading.value = true
   try {
-    const res = await getWrongQuestionList()
-    wrongList.value = res.data.data ?? []
-    const uniqueIds = [...new Set(wrongList.value.map((w) => w.questionId).filter(Boolean))]
+    const [allRes, dueRes] = await Promise.all([
+      getWrongQuestionList(),
+      getDueWrongQuestionList(),
+    ])
+    wrongList.value = allRes.data.data ?? []
+    dueList.value = dueRes.data.data ?? []
+    const uniqueIds = [...new Set([...wrongList.value, ...dueList.value].map((w) => w.questionId).filter(Boolean))]
     for (const qid of uniqueIds) {
       if (!questionTitleMap.value[String(qid)]) {
         getQuestionVOById(qid).then((r) => {
@@ -66,6 +71,14 @@ function openAnalysis(item: WrongQuestionVO) {
   }
 }
 
+function closeAnalysis() {
+  if (sseController) {
+    sseController.abort()
+    sseController = null
+  }
+  analyzing.value = false
+}
+
 function startAnalysis(item: WrongQuestionVO) {
   analysisContent.value = ''
   analyzing.value = true
@@ -91,8 +104,7 @@ function startAnalysis(item: WrongQuestionVO) {
 async function handleReview(item: WrongQuestionVO) {
   try {
     await reviewWrongQuestion({ wrongQuestionId: item.id })
-    item.isReviewed = 1
-    item.reviewCount = (item.reviewCount || 0) + 1
+    markReviewedLocal(item.id)
     Message.success('已标记复习')
   } catch (err: any) {
     Message.error(err?.message || '标记失败')
@@ -103,8 +115,32 @@ function goToQuestion(questionId: number | string) {
   router.push(`/view/question/${questionId}`)
 }
 
+function markReviewedLocal(wrongQuestionId: number) {
+  const targets = [
+    wrongList.value.find((w) => w.id === wrongQuestionId),
+    dueList.value.find((w) => w.id === wrongQuestionId),
+  ].filter(Boolean) as WrongQuestionVO[]
+  for (const target of targets) {
+    target.isReviewed = 1
+    target.reviewCount = (target.reviewCount || 0) + 1
+  }
+  dueList.value = dueList.value.filter((w) => w.id !== wrongQuestionId)
+}
+
 function getJudgeDisplay(result: string) {
   return JUDGE_RESULT_MAP[result] ?? { text: result || '未知', cls: 'status-pending' }
+}
+
+function formatNextReviewTime(value?: string) {
+  if (!value) return '待安排'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '待安排'
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 onMounted(loadList)
@@ -135,6 +171,43 @@ onUnmounted(() => { if (sseController) sseController.abort() })
     </div>
 
     <a-spin :loading="loading">
+      <section class="review-section">
+        <div class="section-header">
+          <div>
+            <div class="section-title">今日待复习</div>
+            <div class="section-sub">到期错题会优先出现在这里，复习完成后自动移出</div>
+          </div>
+          <a-tag color="blue" size="small">{{ dueList.length }} 道</a-tag>
+        </div>
+        <div v-if="dueList.length === 0" class="empty-hint compact">
+          {{ loading ? '' : '今天暂无到期错题' }}
+        </div>
+        <div v-else class="card-grid due-grid">
+          <div v-for="item in dueList" :key="item.id" class="wrong-card due-card">
+            <div class="card-top">
+              <a-tag :color="getJudgeDisplay(item.wrongJudgeResult).cls === 'status-wrong' ? 'red' : 'orangered'" size="small">
+                {{ getJudgeDisplay(item.wrongJudgeResult).text }}
+              </a-tag>
+              <span class="review-count">复习 {{ item.reviewCount ?? 0 }} 次</span>
+            </div>
+            <div class="card-question" @click="goToQuestion(item.questionId)">
+              {{ questionTitleMap[String(item.questionId)] || `题目 #${item.questionId}` }}
+            </div>
+            <div class="review-time">下次复习：{{ formatNextReviewTime(item.nextReviewTime) }}</div>
+            <div class="card-actions">
+              <a-button type="text" size="small" @click="openAnalysis(item)">查看分析</a-button>
+              <a-button type="text" size="small" @click="handleReview(item)">标记复习</a-button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div class="section-header all-header">
+        <div>
+          <div class="section-title">全部错题</div>
+          <div class="section-sub">保留原有列表和错误类型筛选</div>
+        </div>
+      </div>
       <div v-if="filteredList.length === 0" class="empty-hint">
         {{ loading ? '' : '暂无错题记录' }}
       </div>
@@ -164,7 +237,7 @@ onUnmounted(() => { if (sseController) sseController.abort() })
       title="AI 错题分析"
       :width="720"
       :footer="false"
-      @close="() => { if (sseController) { sseController.abort(); sseController = null } analyzing = false }"
+      @close="closeAnalysis"
     >
       <div class="analysis-modal-body">
         <div v-if="currentWrong" class="wrong-code-section">
@@ -222,10 +295,41 @@ onUnmounted(() => { if (sseController) sseController.abort() })
   color: #8c8c8c;
 }
 
+.review-section {
+  margin-bottom: 20px;
+}
+
+.section-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.all-header {
+  margin-top: 4px;
+}
+
+.section-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #262626;
+}
+
+.section-sub {
+  font-size: 12px;
+  color: #8c8c8c;
+  margin-top: 4px;
+}
+
 .card-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 16px;
+}
+
+.due-grid {
+  margin-bottom: 4px;
 }
 
 .wrong-card {
@@ -243,6 +347,11 @@ onUnmounted(() => { if (sseController) sseController.abort() })
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
 }
 
+.due-card {
+  border-color: #bedaff;
+  background: #f7fbff;
+}
+
 .card-top {
   display: flex;
   align-items: center;
@@ -253,6 +362,11 @@ onUnmounted(() => { if (sseController) sseController.abort() })
   font-size: 12px;
   color: #8c8c8c;
   margin-left: auto;
+}
+
+.review-time {
+  font-size: 12px;
+  color: #86909c;
 }
 
 .card-question {
@@ -278,6 +392,13 @@ onUnmounted(() => { if (sseController) sseController.abort() })
   color: #8c8c8c;
   font-size: 14px;
   padding: 40px 0;
+}
+
+.empty-hint.compact {
+  padding: 24px 0;
+  background: #fafafa;
+  border: 1px dashed #e5e6eb;
+  border-radius: 8px;
 }
 
 .analysis-modal-body {

@@ -66,6 +66,15 @@ public class AiWrongQuestionServiceImpl implements AiWrongQuestionService {
     }
 
     @Override
+    public List<WrongQuestionVO> listDueReviewQuestions(Long userId) {
+        List<AiWrongQuestion> rows = aiWrongQuestionMapper.selectDueReviewList(userId);
+        if (rows == null || rows.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return rows.stream().map(WrongQuestionVO::objToVo).collect(Collectors.toList());
+    }
+
+    @Override
     public String analyzeWrongQuestion(Long userId, Long wrongQuestionId) {
         AiWrongQuestion wrong = requireOwnedWrongQuestion(userId, wrongQuestionId);
         WrongQuestionContext context = buildContext(userId, wrong);

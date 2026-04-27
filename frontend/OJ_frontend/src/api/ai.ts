@@ -50,6 +50,9 @@ export const getAiSimilarQuestions = (questionId: number | string) =>
 export const getWrongQuestionList = () =>
   request.get<BaseResponse<WrongQuestionVO[]>>('/ai/wrong-question/list')
 
+export const getDueWrongQuestionList = () =>
+  request.get<BaseResponse<WrongQuestionVO[]>>('/ai/wrong-question/due')
+
 export const getWrongQuestionAnalysis = (wrongQuestionId: number) =>
   request.get<BaseResponse<string>>('/ai/wrong-question/analysis', {
     params: { wrongQuestionId },

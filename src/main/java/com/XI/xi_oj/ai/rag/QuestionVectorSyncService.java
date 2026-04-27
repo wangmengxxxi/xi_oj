@@ -79,8 +79,10 @@ public class QuestionVectorSyncService {
      * @return 格式化后的文本内容
      */
     private String buildVectorText(Question question) {
-        return String.format("题目标题：%s\n题干：%s\n考点标签：%s",
+        return String.format("题目ID：%d\n题目标题：%s\n题目链接：/view/question/%d\n题干：%s\n考点标签：%s",
+                question.getId(),
                 safe(question.getTitle()),
+                question.getId(),
                 safe(question.getContent()),
                 safe(question.getTags()));
     }

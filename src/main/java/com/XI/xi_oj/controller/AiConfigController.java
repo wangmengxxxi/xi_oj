@@ -64,7 +64,14 @@ public class AiConfigController {
     @PostMapping("/question-vector/rebuild")
     @AuthCheck(mustRole = "admin")
     public BaseResponse<String> rebuildQuestionVectors() {
-        int count = questionVectorSyncService.rebuildQuestionVectors();
-        return ResultUtils.success("题目向量重建完成，成功同步 " + count + " 道题目");
+        new Thread(() -> {
+            try {
+                int count = questionVectorSyncService.rebuildQuestionVectors();
+                log.info("[QuestionVector] async rebuild finished, count={}", count);
+            } catch (Exception e) {
+                log.error("[QuestionVector] async rebuild failed", e);
+            }
+        }, "question-vector-rebuild").start();
+        return ResultUtils.success("题目向量重建任务已提交，请稍后查看日志确认结果");
     }
 }

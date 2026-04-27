@@ -260,6 +260,7 @@ export interface WrongQuestionVO {
   wrongAnalysis: string
   reviewCount: number
   isReviewed: number
+  nextReviewTime?: string
 }
 
 export interface WrongQuestionReviewRequest {

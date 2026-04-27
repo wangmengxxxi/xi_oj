@@ -324,14 +324,21 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    A["用户 query（原始）"] --> B["EmbeddingModel.embed()"]
-    B --> C["Milvus 向量检索<br/>topK + minScore"]
-    C --> D["metadata 过滤<br/>content_type / difficulty"]
+    A["用户 query（原始）"] --> B["DefaultQueryRouter<br/>路由到两个 Retriever"]
+    B --> C1["oj_knowledge<br/>知识点检索"]
+    B --> C2["oj_question<br/>题目检索"]
+    C1 --> D["合并结果"]
+    C2 --> D
     D --> E["Redis 缓存"]
     E --> F["注入 Prompt"]
 ```
 
-问题：
+> **架构说明**：`AiModelHolder` 使用 LangChain4j 内置的 `DefaultRetrievalAugmentor` + `DefaultQueryRouter`，将用户 query 同时发给两个 `EmbeddingStoreContentRetriever`（分别查 `oj_knowledge` 知识点集合和 `oj_question` 题目集合），结果自动合并后注入 Prompt。这样当用户问知识点时，知识条目分数高自然排前面；问题目推荐时，题目条目排前面。
+>
+> `oj_question` 集合的向量文本包含题目 ID 和链接（如 `/view/question/42`），LLM 可以直接引用真实链接，避免编造。
+
+问题（优化前的原始架构只查 oj_knowledge，已修复）：
+- ~~RAG 只查 `oj_knowledge` 集合，不查 `oj_question`，导致 LLM 推荐题目时编造不存在的题目名和 ID。~~（已通过 `DefaultQueryRouter` 双集合检索修复）
 - 用户 query 通常是口语化短句（"二分怎么写"），语义信息稀疏，Embedding 质量低。
 - 向量检索只做了相似度阈值过滤，没有精排，TopK 结果质量参差不齐。
 - 没有量化指标，无法衡量优化效果。
@@ -341,11 +348,13 @@ flowchart LR
 ```mermaid
 flowchart LR
     A["用户 query（原始）"] --> B["QueryRewriter<br/>轻量模型改写"]
-    B --> C["EmbeddingModel.embed()"]
-    C --> D["Milvus 向量检索<br/>topK=10（多取）"]
-    D --> E["metadata 过滤<br/>content_type / difficulty"]
+    B --> C["DefaultQueryRouter<br/>路由到两个 Retriever"]
+    C --> D1["oj_knowledge<br/>知识点检索 topK=10"]
+    C --> D2["oj_question<br/>题目检索 topK=10"]
+    D1 --> E["合并结果"]
+    D2 --> E
     E --> F["RerankService<br/>Cross-Encoder 精排"]
-    F --> G["取 Top3"]
+    F --> G["取 Top3~5"]
     G --> H["Redis 缓存"]
     H --> I["注入 Prompt"]
 ```
@@ -373,10 +382,9 @@ src/main/java/com/XI/xi_oj/ai/rag/
 package com.XI.xi_oj.ai.rag;
 
 import com.XI.xi_oj.utils.TimeUtil;
-import dev.langchain4j.model.chat.ChatLanguageModel;
+import dev.langchain4j.model.chat.ChatModel;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.util.DigestUtils;
@@ -456,7 +464,7 @@ public class QueryRewriter {
 
 ```java
 // 在 AiModelHolder.java 中新增
-private volatile ChatLanguageModel rewriteModel;
+private volatile ChatModel rewriteModel;
 
 @PostConstruct
 public void init() {
@@ -464,12 +472,13 @@ public void init() {
     this.rewriteModel = buildRewriteModel();
 }
 
-private ChatLanguageModel buildRewriteModel() {
-    String modelName = aiConfigService.getConfigValue("ai.rewrite.model_name", "qwen-turbo");
+private ChatModel buildRewriteModel() {
+    // 配置项的默认值在 ai_config 表中设置（见第四章 SQL），代码侧不硬编码默认值
+    String modelName = aiConfigService.getConfigValue("ai.rewrite.model_name");
     float temperature = Float.parseFloat(
-            aiConfigService.getConfigValue("ai.rewrite.temperature", "0.1"));
+            aiConfigService.getConfigValue("ai.rewrite.temperature"));
     int maxTokens = Integer.parseInt(
-            aiConfigService.getConfigValue("ai.rewrite.max_tokens", "256"));
+            aiConfigService.getConfigValue("ai.rewrite.max_tokens"));
 
     return QwenChatModel.builder()
             .apiKey(apiKey)
@@ -479,7 +488,7 @@ private ChatLanguageModel buildRewriteModel() {
             .build();
 }
 
-public ChatLanguageModel getRewriteModel() {
+public ChatModel getRewriteModel() {
     return rewriteModel;
 }
 ```
@@ -493,7 +502,7 @@ private static final Set<String> REWRITE_MODEL_KEYS = Set.of(
 
 @EventListener
 public void onConfigChanged(AiConfigChangedEvent event) {
-    String key = event.getKey();
+    String key = event.getConfigKey();
     if (MODEL_NAME_KEYS.contains(key)) {
         // 全量重建（现有逻辑）
     } else if (REWRITE_MODEL_KEYS.contains(key)) {
@@ -979,10 +988,10 @@ public class ToolDispatcher {
                     ojTools.queryQuestionInfo((String) params.get("keyword"));
             case "judge_user_code" ->
                     ojTools.judgeUserCode(
+                            toLong(params.get("userId")),
                             toLong(params.get("questionId")),
                             (String) params.get("code"),
-                            (String) params.get("language"),
-                            toLong(params.get("userId")));
+                            (String) params.get("language"));
             case "query_user_wrong_question" ->
                     ojTools.queryUserWrongQuestion(
                             toLong(params.get("userId")),
@@ -990,7 +999,7 @@ public class ToolDispatcher {
             case "search_questions" ->
                     ojTools.searchQuestions(
                             (String) params.get("keyword"),
-                            (String) params.get("tags"),
+                            (String) params.get("tag"),
                             (String) params.get("difficulty"));
             case "find_similar_questions" ->
                     ojTools.findSimilarQuestions(
@@ -1036,7 +1045,7 @@ package com.XI.xi_oj.ai.agent;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import dev.langchain4j.data.message.*;
-import dev.langchain4j.model.chat.ChatLanguageModel;
+import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
@@ -1056,9 +1065,9 @@ public class AgentLoopService {
             你是 XI OJ 平台的智能编程助教。你可以使用以下工具：
 
             1. query_question_info(keyword) - 按关键词或 ID 查询题目信息
-            2. judge_user_code(questionId, code, language, userId) - 提交代码判题
+            2. judge_user_code(userId, questionId, code, language) - 提交代码判题
             3. query_user_wrong_question(userId, questionId) - 查询某道题的错题记录
-            4. search_questions(keyword, tags, difficulty) - 按关键词/标签/难度搜索题目列表
+            4. search_questions(keyword, tag, difficulty) - 按关键词/标签/难度搜索题目列表
             5. find_similar_questions(questionId) - 基于向量检索查找相似题目
             6. list_user_wrong_questions(userId) - 查询用户所有错题列表
             7. query_user_submit_history(userId, questionId) - 查询用户提交历史
@@ -1098,7 +1107,7 @@ public class AgentLoopService {
         messages.add(SystemMessage.from(SYSTEM_PROMPT));
         messages.add(UserMessage.from(userQuery));
 
-        ChatLanguageModel chatModel = aiModelHolder.getChatModel();
+        ChatModel chatModel = aiModelHolder.getChatModel();
 
         for (int i = 0; i < MAX_STEPS; i++) {
             long stepStart = System.currentTimeMillis();

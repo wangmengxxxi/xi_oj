@@ -5,6 +5,7 @@ import lombok.Data;
 import org.springframework.beans.BeanUtils;
 
 import java.io.Serializable;
+import java.util.Date;
 
 /**
  * 错题封装类（只读 VO，供 OJTools 和 Controller 层返回）
@@ -26,6 +27,7 @@ public class WrongQuestionVO implements Serializable {
     private Integer reviewCount;
     /** 是否已复习 */
     private Integer isReviewed;
+    private Date nextReviewTime;
     /**
      * 实体转 VO
      */

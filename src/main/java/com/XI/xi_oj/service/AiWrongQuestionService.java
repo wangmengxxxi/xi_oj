@@ -9,6 +9,8 @@ public interface AiWrongQuestionService {
 
     List<WrongQuestionVO> listMyWrongQuestions(Long userId);
 
+    List<WrongQuestionVO> listDueReviewQuestions(Long userId);
+
     String analyzeWrongQuestion(Long userId, Long wrongQuestionId);
 
     Flux<String> analyzeWrongQuestionStream(Long userId, Long wrongQuestionId);

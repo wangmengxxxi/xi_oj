@@ -29,4 +29,10 @@ public interface AiWrongQuestionMapper extends BaseMapper<AiWrongQuestion> {
 
     @Select("SELECT " + COLUMN_MAPPING + " FROM ai_wrong_question WHERE user_id = #{userId} ORDER BY updateTime DESC, id DESC")
     List<AiWrongQuestion> selectListByUser(@Param("userId") Long userId);
+
+    @Select("SELECT " + COLUMN_MAPPING + " FROM ai_wrong_question WHERE user_id = #{userId} " +
+            "AND ((next_review_time IS NOT NULL AND next_review_time <= NOW()) " +
+            "OR (next_review_time IS NULL AND is_reviewed = 0)) " +
+            "ORDER BY COALESCE(next_review_time, createTime) ASC, updateTime DESC, id DESC")
+    List<AiWrongQuestion> selectDueReviewList(@Param("userId") Long userId);
 }

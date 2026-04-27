@@ -11,7 +11,10 @@ import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.embedding.EmbeddingModel;
+import dev.langchain4j.rag.DefaultRetrievalAugmentor;
+import dev.langchain4j.rag.RetrievalAugmentor;
 import dev.langchain4j.rag.content.retriever.EmbeddingStoreContentRetriever;
+import dev.langchain4j.rag.query.router.DefaultQueryRouter;
 import dev.langchain4j.service.AiServices;
 import dev.langchain4j.store.embedding.milvus.MilvusEmbeddingStore;
 import dev.langchain4j.store.memory.chat.ChatMemoryStore;
@@ -44,8 +47,10 @@ public class AiModelHolder {
     private final AiConfigService aiConfigService;
     // OJ工具服务
     private final OJTools ojTools;
-    // Milvus向量存储
+    // Milvus向量存储（知识点）
     private final MilvusEmbeddingStore embeddingStore;
+    // Milvus向量存储（题目）
+    private final MilvusEmbeddingStore questionEmbeddingStore;
     // 聊天记忆存储
     private final ChatMemoryStore chatMemoryStore;
 
@@ -73,10 +78,12 @@ public class AiModelHolder {
     public AiModelHolder(AiConfigService aiConfigService,
                          OJTools ojTools,
                          @Qualifier("embeddingStore") MilvusEmbeddingStore embeddingStore,
+                         @Qualifier("questionEmbeddingStore") MilvusEmbeddingStore questionEmbeddingStore,
                          ChatMemoryStore chatMemoryStore) {
         this.aiConfigService = aiConfigService;
         this.ojTools = ojTools;
         this.embeddingStore = embeddingStore;
+        this.questionEmbeddingStore = questionEmbeddingStore;
         this.chatMemoryStore = chatMemoryStore;
     }
 
@@ -272,7 +279,10 @@ public class AiModelHolder {
             - query_user_submit_history：查询用户的代码提交记录
             【工具调用规范】
             - 收到问题后判断是否需要调用工具，需要则直接调用，不需要向用户解释你要调用什么工具；
-            - 工具返回结果后直接基于结果回答用户，不要描述工具调用过程。
+            - 工具返回结果后直接基于结果回答用户，不要描述工具调用过程；
+            - 绝对不要自己编造题目名称、题目ID或题目链接，所有题目信息必须来自工具返回结果；
+            - 如果用户要求推荐题目，必须先调用 search_questions 或 find_similar_questions 获取真实题目数据，严禁根据自身知识虚构题目；
+            - 回答中只能包含工具实际返回的链接，不要自行拼接 /view/question/xxx 格式的链接。
             """;
 
     private static final String DEFAULT_PARSE_SYSTEM_PROMPT = """
@@ -297,7 +307,7 @@ public class AiModelHolder {
                 .chatModel(this.chatModel)
                 .streamingChatModel(this.streamingChatModel)
                 .tools(ojTools)
-                .contentRetriever(buildRetriever())
+                .retrievalAugmentor(buildRetrievalAugmentor())
                 .systemMessageProvider(memoryId ->
                         aiConfigService.getPrompt("ai.prompt.chat_system", DEFAULT_CHAT_SYSTEM_PROMPT))
                 .chatMemoryProvider(memoryId ->
@@ -313,24 +323,36 @@ public class AiModelHolder {
         return AiServices.builder(OJQuestionParseAgent.class)
                 .chatModel(this.chatModel)
                 .streamingChatModel(this.streamingChatModel)
-                .contentRetriever(buildRetriever())
+                .retrievalAugmentor(buildRetrievalAugmentor())
                 .systemMessageProvider(memoryId ->
                         aiConfigService.getPrompt("ai.prompt.question_parse", DEFAULT_PARSE_SYSTEM_PROMPT))
                 .build();
     }
 
     /**
-     * 构建内容检索器
-     * @return EmbeddingStoreContentRetriever 构建好的内容检索器
+     * 构建检索增强器（双集合：知识点 + 题目）
+     * 使用 DefaultQueryRouter 将 query 同时发给两个 ContentRetriever，结果自动合并
      */
-    private EmbeddingStoreContentRetriever buildRetriever() {
+    private RetrievalAugmentor buildRetrievalAugmentor() {
         int topK = Integer.parseInt(aiConfigService.getConfigValue("ai.rag.top_k"));
         double minScore = Double.parseDouble(aiConfigService.getConfigValue("ai.rag.similarity_threshold"));
-        return EmbeddingStoreContentRetriever.builder()
+
+        EmbeddingStoreContentRetriever knowledgeRetriever = EmbeddingStoreContentRetriever.builder()
                 .embeddingStore(embeddingStore)
                 .embeddingModel(this.embeddingModel)
                 .maxResults(topK)
                 .minScore(minScore)
+                .build();
+
+        EmbeddingStoreContentRetriever questionRetriever = EmbeddingStoreContentRetriever.builder()
+                .embeddingStore(questionEmbeddingStore)
+                .embeddingModel(this.embeddingModel)
+                .maxResults(topK)
+                .minScore(minScore)
+                .build();
+
+        return DefaultRetrievalAugmentor.builder()
+                .queryRouter(new DefaultQueryRouter(knowledgeRetriever, questionRetriever))
                 .build();
     }
 }
